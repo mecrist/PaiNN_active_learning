@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Active Learning Runtime Outputs & Dynamic Data
+dft_calculations/
+checkpoints/
+trajectories/
+parsl_info/
+al_checkpoint.json
+al_dataset.xyz
+
+# HPC / Slurm Log Files
+*.out
+*.err
+painn_al_*.out
+painn_al_*.err
+slurm-*.out
+slurm-*.err
+
+# Temporary & Editor Files
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

@@ -1,0 +1,106 @@
+ACTIVE_LEARNING:
+  species_dir: /home/maria.crist/fhi-aims.260331/species_defaults/defaults_2020/light    
+  num_trajectories: 10      
+  ensemble_size: 3                
+  max_MD_steps: 1000                
+  max_train_set_size: 200          
+  converge_al: true               
+  initial_train_dataset: /home/maria.crist/pax/train.xyz
+  initial_valid_dataset: /home/maria.crist/pax/valid.xyz
+
+MD:
+  0:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 300
+    timestep: 0.0005
+  1:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 450
+    timestep: 0.0005
+  2:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 300
+    timestep: 0.0005
+  3:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 450
+    timestep: 0.0005
+  4:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 400
+    timestep: 0.0005
+  5:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 450
+    timestep: 0.0005
+  6:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 300
+    timestep: 0.0005
+  7:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 450
+    timestep: 0.0005
+  8:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 300
+    timestep: 0.0005
+  9:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 450
+    timestep: 0.0005
+
+MISC:
+  path_to_geometry: /home/maria.crist/pax/geometries/
+  path_to_control: /home/maria.crist/pax/control.in    
+  create_restart: true
+
+CLUSTER:
+  type: slurm
+  project_name: 'silica_water_mace_run'
+  executor: workqueue
+  parsl_options:
+    nodes_per_block: 1
+    init_blocks: 1
+    min_blocks: 1
+    max_blocks: 4
+    label: aimspax_probe_4sys
+  slurm_str: |
+    #SBATCH --partition=nanotubo
+    #SBATCH --ntasks-per-node=32
+    #SBATCH --time=8:00:00
+  worker_str: |
+    module purge
+    module use "${AIMS_MODULEFILES:-/home/maria.crist/fhi-aims.260331/modulefiles/}"
+    module load fhi-aims/260331
+
+    source /opt/spack/opt/spack/linux-oracle8-x86_64/gcc-12.2.0/miniconda3-22.11.1-qnqpe5kjmlj72r2lv6k4dffgsepien22/etc/profile.d/conda.sh
+    conda activate my_env
+    
+    ulimit -s unlimited
+    export KMP_STACKSIZE=512m
+
+    export OMP_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    
+    export I_MPI_EXTRA_FILESYSTEM=on
+    export I_MPI_EXTRA_FILESYSTEM_FORCE=nfs
+    export I_MPI_HYDRA_BOOTSTRAP=slurm
+    export I_MPI_PMI_LIBRARY=/usr/lib64/libpmi2.so
+
+    export WORK_QUEUE_DISABLE_SHARED_PORT=1
+    
+    unset SLURM_MEM_PER_NODE
+    
+  launch_str: "mpirun -bootstrap slurm aims.x"
+  calc_dir: /home/maria.crist/pax/aims_ase_calcs

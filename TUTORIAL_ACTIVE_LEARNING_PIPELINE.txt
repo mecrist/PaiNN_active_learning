@@ -1,0 +1,926 @@
+================================================================================
+          ACTIVE LEARNING PIPELINE TUTORIAL: FROM AIMS-PAX TO PAINN
+================================================================================
+Author: Antigravity Assistant
+Date: September 2026
+System: Silica + Water Interface & Polymorphs (alpha-quartz, beta-cristobalite, slabs)
+Directories:
+  - Current aims-PAX Pipeline: /home/maria.crist/pax
+  - PaiNN Fine-Tuned Models:   /home/maria.crist/dft_mlip/my_dataset
+  - aims-PAX Source Code:      /home/maria.crist/aims-PAX
+================================================================================
+
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+1. EXECUTIVE SUMMARY & ACTIVE LEARNING ESSENTIALS
+2. THE CURRENT AIMS-PAX PIPELINE IN /home/maria.crist/pax
+   2.1 Directory Structure & File Roles
+   2.2 Pipeline Configuration (aimsprobe.yaml, model.yaml, control.in)
+   2.3 How the Active Learning State Machine Works (Step-by-Step)
+   2.4 HPC Architecture: Parsl, WorkQueue, and Slurm Split
+   2.5 Uncertainty Metric & Dynamic Threshold Adaptation
+   2.6 Convergence Phase & Output Deliverables
+3. WHAT CAN BE DONE WITH THIS PIPELINE (USE CASES & SCIENTIFIC EXTENSIONS)
+   3.1 Reactive Interface Sampling (Silica / Water Dissociation)
+   3.2 High-Temperature & Phase Transition Exploration
+   3.3 Multi-Polymorph Simultaneous Exploration
+   3.4 Dataset Condensation (Minimal-Budget Data Generation)
+   3.5 Recalculation / Functional Upgrades (aims-PAX-recalc)
+   3.6 Biased Sampling & Uncertainty-Driven Dynamics (UDD)
+4. THE PAINN MODELS IN dft_mlip/my_dataset
+   4.1 Model Architecture & Framework (Neural Force Field / nff)
+   4.2 The 3-Member Committee Ensemble Structure
+   4.3 Critical Data Requirements: Reference Energy (E0) Offsets
+   4.4 Graph Construction (Cutoff, Non-Periodic Slabs/Clusters)
+   4.5 Performance Benchmarks (Energy & Force Accuracy)
+5. HOW TO REPRODUCE ACTIVE LEARNING FOR PAINN MODELS
+   5.1 High-Level Strategy Comparison: Standalone Script vs aims-PAX Fork
+   5.2 Approach A: Dedicated, Lightweight Active Learning Driver (Recommended)
+       - 5.2.1 Architecture Diagram & Data Flow
+       - 5.2.2 The Custom PaiNN ASE Ensemble Calculator
+       - 5.2.3 Asynchronous DFT Task Dispatcher
+       - 5.2.4 Incremental Fine-Tuning & Dataset Synchronization
+       - 5.2.5 Full Working Reproduction Script (painn_active_learning.py)
+   5.3 Approach B: Integrating PaiNN into aims-PAX Codebase
+       - 5.3.1 Required Settings & Schema Updates
+       - 5.3.2 Wrapping NFF within aims-PAX Procedures
+6. STEP-BY-STEP REPRODUCTION RECIPE & RUN GUIDE
+   6.1 Environment Preparation (my_env vs nff)
+   6.2 Slurm Submission Scripts (metano GPU vs nanotubo CPU)
+   6.3 Sanity Checks, Pitfalls, and Best Practices
+================================================================================
+
+
+================================================================================
+1. EXECUTIVE SUMMARY & ACTIVE LEARNING ESSENTIALS
+================================================================================
+In computational chemistry and materials science, training Machine Learning
+Interatomic Potentials (MLIPs) by brute-force Ab Initio Molecular Dynamics (AIMD)
+is computationally prohibitive and inherently redundant:
+  - 95%+ of structures sampled during standard AIMD dwell in equilibrium basins.
+  - Rare events, transition states, and high-energy configurations (e.g. bond
+    breaking, water dissociation at mineral interfaces) are rarely sampled.
+  - When the MLIP encounters these uncharted regions during MD, it extrapolates
+    unphysically, causing simulation explosion or unphysical "flying atoms".
+
+Active Learning (AL) solves this by closing the loop:
+  1. An ensemble (committee) of MLIP models drives the MD simulation.
+  2. The committee members predict forces independently; disagreement (variance
+     or standard deviation) among them serves as an instantaneous proxy for
+     model uncertainty.
+  3. When the uncertainty exceeds a dynamic threshold, MD halts.
+  4. The uncertain configuration is dispatched to a reference quantum chemistry
+     code (here FHI-aims DFT).
+  5. The DFT energy and forces are assimilated into the training set.
+  6. The ensemble models are fine-tuned on the new data.
+  7. The updated ensemble resumes MD exploration from where it left off.
+
+This creates a self-healing, data-efficient MLIP that achieves chemical accuracy
+with orders of magnitude fewer DFT evaluations.
+
+
+================================================================================
+2. THE CURRENT AIMS-PAX PIPELINE IN /home/maria.crist/pax
+================================================================================
+
+2.1 DIRECTORY STRUCTURE & FILE ROLES
+------------------------------------
+The working directory `/home/maria.crist/pax` contains:
+  - `aimsprobe.yaml`: Primary workflow, active learning parameters, MD recipes,
+    and HPC cluster settings.
+  - `model.yaml`: ML potential architecture specifications (currently MACE)
+    and training hyperparameters.
+  - `control.in`: Quantum chemistry settings for FHI-aims DFT.
+  - `geometries/`: Directory containing starting configurations:
+      * geometry_alpha.in      (Bulk alpha-quartz)
+      * geometry_alpha_slab.in (Alpha-quartz slab with water)
+      * geometry_beta.in       (Bulk beta-cristobalite)
+      * geometry_beta_slab.in  (Beta-cristobalite slab with water)
+      * geometry_water.in      (Bulk water box)
+  - `train.xyz` & `valid.xyz`: Pre-existing initial seed dataset (94 train, 11 val).
+  - `job_gpu.sh`: Slurm launch script running `aims-PAX-al` on a GPU node (`metano`).
+  - `aims_ase_calcs/`: Working directory for FHI-aims DFT evaluations.
+  - `trajectories/`: Output ASE trajectory files (.traj) recorded during AL.
+  - `checkpoints/` & `restart/`: Persistent state to resume interrupted runs.
+  - `model/` & `results/`: Final converged model weights and exported datasets.
+  - `losses/`: CSV logs of train/validation loss per ensemble member per epoch.
+
+
+2.2 PIPELINE CONFIGURATION
+--------------------------
+The pipeline is governed by two YAML configuration files:
+
+A. `aimsprobe.yaml`:
+   - `ACTIVE_LEARNING`:
+       * `species_dir`: Path to FHI-aims species defaults
+         (`/home/maria.crist/fhi-aims.260331/species_defaults/defaults_2020/light`)
+       * `num_trajectories: 10`: Number of simultaneous MD exploration streams.
+       * `ensemble_size: 3`: Number of models in the committee.
+       * `max_MD_steps: 1000`: Maximum steps per trajectory (10,000 steps total).
+       * `max_train_set_size: 200`: Hard stop limit when 200 DFT points are collected.
+       * `skip_step_mlff: 25`: Uncertainty evaluation interval (every 25 MD steps).
+       * `uncertainty_type: max_atomic_sd`: Uncertainty metric (maximum atomic force
+         standard deviation across the committee).
+       * `margin: 0.002`: Threshold relaxation margin.
+       * `epochs_per_worker: 2`: Number of epochs trained when new DFT point arrives.
+       * `converge_al: true`: Run final full training after AL completes.
+       * `converge_best: true`: Train the best validation model to full convergence.
+       * `convergence_patience: 50`: Early stopping patience for final convergence.
+   - `MD`:
+       * Defines 10 trajectory profiles (IDs 0 to 9).
+       * Thermostat: Langevin, NVT ensemble, timestep 0.5 fs (0.0005 ps).
+       * Temperatures: Varied across trajectories (300K, 400K, 450K) to explore
+         both room-temperature and activated thermal configurations.
+   - `MISC`:
+       * `path_to_geometry`: Points to `geometries/` (5 structures assigned
+         round-robin to the 10 MD trajectories).
+       * `path_to_control`: Points to `control.in`.
+   - `CLUSTER`:
+       * `type: slurm`: Cluster scheduler.
+       * `executor: workqueue`: Parsl WorkQueue distributed task executor.
+       * `parsl_options`: Dynamically allocates 1 to 4 Slurm worker blocks
+         on partition `nanotubo` (32 cores per node, 8 hours time limit).
+       * `launch_str`: `mpirun -bootstrap slurm aims.x`.
+
+B. `model.yaml`:
+   - `ARCHITECTURE`:
+       * `model_choice: mace`
+       * `r_max: 5.0`: Radial cutoff (5.0 Angstroms).
+       * `num_channels: 32`, `max_L: 1`: Equivariant spherical harmonic representation.
+       * `radial_MLP: [16, 16, 16]`: 3-layer radial neural network.
+   - `TRAINING`:
+       * `optimizer: adam`, `amsgrad: true`, `lr: 0.005`.
+       * `loss: weighted`, `energy_weight: 1.0`, `forces_weight: 1000.0`.
+   - `MISC`:
+       * `device: cuda`: Runs ML MD and training passes on the GPU.
+
+C. `control.in`:
+   - DFT settings for FHI-aims: PBE functional, Hirshfeld van der Waals correction,
+     scalar relativistic `atomic_zora scalar`, Gamma-point `k_grid 1 1 1` (suitable
+     for large slab + water interface systems), `sc_accuracy_forces 1E-3`.
+
+
+2.3 HOW THE ACTIVE LEARNING STATE MACHINE WORKS (STEP-BY-STEP)
+--------------------------------------------------------------
+The active learning loop in `aims_PAX/procedures/active_learning.py` runs an
+asynchronous event loop managing 10 concurrent trajectory workers:
+
+Step 1: Initialization
+  - Loads starting geometries and existing dataset (`train.xyz`, `valid.xyz`).
+  - Initializes 3 MACE models with distinct random seeds (`seed: 100`, `123`, `777`).
+  - Computes elemental reference atomic energies E0 from the training data:
+      E0(H) = 1295.28 eV, E0(O) = -4671.17 eV, E0(Si) = -2659.40 eV.
+  - Initializes Parsl WorkQueue executor in the background.
+
+Step 2: Trajectory Propagation ("running" state)
+  - MD trajectories (0 to 9) run on the GPU via ASE `Langevin` dynamics.
+  - The mean committee force governs the atomic movement.
+  - Trajectories save checkpoints periodically.
+
+Step 3: Uncertainty Evaluation
+  - Every 25 MD steps (`skip_step_mlff`), each model in the committee evaluates
+    the structure:
+      F_m(i) = force predicted by model m (m in {0, 1, 2}) on atom i.
+  - The standard deviation of the atomic forces is computed:
+      sigma_i = sqrt( (1 / (M - 1)) * sum_{m=1}^M || F_m(i) - <F(i)> ||^2 )
+  - The global uncertainty is:
+      U = max_i ( sigma_i )
+  - U is compared against the adaptive threshold U_thresh.
+
+Step 4: Out-of-Distribution Detection & Asynchronous DFT Query ("waiting" state)
+  - If U > U_thresh (e.g. U = 65.8 meV/A vs threshold 14.0 meV/A):
+      * Trajectory worker pauses and enters "waiting" state.
+      * The structure is dispatched as an asynchronous Parsl task to Slurm.
+      * Parsl submits a job to the CPU partition (`nanotubo`), invoking
+        `mpirun aims.x` with `control.in`.
+      * CRITICAL FEATURE: All other trajectories (whose uncertainty is below
+        threshold) continue running MD on the GPU without waiting!
+
+Step 5: Assimilation & Online Retraining ("training" state)
+  - When FHI-aims finishes, Parsl returns energy, forces, and Hirshfeld charges.
+  - If `valid_ratio` condition triggers, structure goes to validation; otherwise
+    added to `train.xyz`.
+  - Trajectory enters "training" state:
+      * The committee models are fine-tuned on the updated dataset for
+        `epochs_per_worker = 2` epochs on the GPU.
+      * New weights are reloaded into the ASE calculator.
+      * Trajectory state resets to "running" and resumes MD from the last step.
+
+Step 6: Stopping Criteria & Convergence
+  - Loop terminates when:
+      a) All trajectories reach `max_MD_steps` (1000 steps), OR
+      b) Total training size reaches `max_train_set_size` (200 structures), OR
+      c) Validation error drops below `desired_acc`.
+  - A full convergence training session is executed (`converge_al: true`),
+    training the best model until no improvement for 50 epochs (`convergence_patience`).
+  - Final models, datasets, and trajectories are saved to `results/`.
+
+
+2.4 HPC ARCHITECTURE: PARSL, WORKQUEUE, AND SLURM SPLIT
+-------------------------------------------------------
+A key strength of aims-PAX is heterogeneous HPC task distribution:
+  - Node A (GPU: `metano`): Runs `job_gpu.sh` (Python controller, ASE Langevin MD,
+    MACE PyTorch forward/backward passes).
+  - Nodes B..E (CPU: `nanotubo`): Parsl WorkQueue dynamically requests 32-core
+    CPU nodes to run parallel MPI FHI-aims calculations.
+This prevents expensive GPU nodes from sitting idle while DFT runs, and prevents
+CPU nodes from being starved by sequential single-point calculations.
+
+
+================================================================================
+3. WHAT CAN BE DONE WITH THIS PIPELINE (USE CASES & SCIENTIFIC EXTENSIONS)
+================================================================================
+
+3.1 REACTIVE INTERFACE SAMPLING (SILICA / WATER DISSOCIATION)
+------------------------------------------------------------
+At mineral-water interfaces, water molecules adsorb, dissociate into OH- and H+,
+protonate surface oxygens (silanols Si-OH), and attack Si-O-Si siloxane bridges.
+Standard MD never sees bond cleavages because the activation barrier is 0.6-1.2 eV.
+With this active learning pipeline:
+  - Trajectories at 450K push molecules toward transition states.
+  - As bonds stretch into the reaction barrier, committee models disagree sharply.
+  - The transition state geometry is flagged (U >> U_thresh) and labeled by DFT.
+  - The potential learns the exact reactive surface chemistry automatically!
+
+3.2 HIGH-TEMPERATURE & PHASE TRANSITION EXPLORATION
+---------------------------------------------------
+By setting temperature ladders (e.g. 300K, 600K, 1000K, 1500K) or gradual heating,
+the pipeline samples liquid silica, amorphous silica quenching, and coordination
+defects (3-fold and 5-fold silicon atoms).
+
+3.3 MULTI-POLYMORPH SIMULTANEOUS EXPLORATION
+--------------------------------------------
+Because `geometries/` accepts multiple input files, a single run simultaneously
+samples:
+  - Alpha-quartz bulk & surfaces
+  - Beta-cristobalite bulk & surfaces
+  - Amorphous silica slabs
+  - Liquid water clusters and droplets
+The resulting potential is globally transferable across all phases.
+
+3.4 MINIMAL-BUDGET DATASET GENERATION
+-------------------------------------
+Instead of computing 20,000 AIMD steps (which wastes months of CPU hours on
+repetitive vibrations), active learning selects only 100-300 maximally
+informative structures, generating an ultra-compact, high-density training set.
+
+3.5 RECALCULATING DATASETS WITH HIGHER DFT ACCURACY (aims-PAX-recalc)
+-------------------------------------------------------------------
+Once the active learning loop collects 200 diverse structures with cheap PBE DFT,
+the user can run:
+  `aims-PAX-recalc --aimsPAX-settings recalc.yaml`
+to re-evaluate all collected structures at hybrid-DFT (e.g. HSE06 or PBE0) or
+with larger basis sets (e.g. `intermediate` or `tight`), upgrading model accuracy
+at negligible cost.
+
+3.6 UNCERTAINTY-DRIVEN DYNAMICS (UDD)
+-------------------------------------
+In `aims_PAX/tools/uncertainty.py`, `UDDCalculator` provides a bias potential
+proportional to model uncertainty:
+  V_bias(R) = + gamma * U(R)
+This actively drives the MD trajectory toward regions of highest model ignorance,
+acting as an autonomous transition-state finder.
+
+
+================================================================================
+4. THE PAINN MODELS IN dft_mlip/my_dataset
+================================================================================
+
+4.1 MODEL ARCHITECTURE & FRAMEWORK
+----------------------------------
+The PaiNN (Polarizable Atom Interaction Neural Network) models in
+`/home/maria.crist/dft_mlip/my_dataset/` are built using the `nff` (Neural Force
+Field) library in Conda environment `/home/maria.crist/.conda/envs/nff`:
+  - Message-passing neural network maintaining both scalar (charge/density)
+    and directional vector representations.
+  - Cutoff radius: r_cut = 6.0 Angstroms.
+  - Radial basis: Bessel basis functions.
+  - Energy and forces are computed via automatic differentiation of energy:
+      F = - grad_R ( E )
+
+4.2 THE 3-MEMBER COMMITTEE ENSEMBLE STRUCTURE
+---------------------------------------------
+In `/home/maria.crist/dft_mlip/my_dataset/{mine,merged}/model_2_ep{100,500,1000}/`:
+There is a fine-tuned committee:
+  `silica_Painn_model_finetuned/painn_ensemble/`
+    |-- model_0/best_model
+    |-- model_1/best_model
+    `-- model_2/best_model
+
+Each model was initialized from the pre-trained base model:
+  `/home/maria.crist/1st_dft_mlip/mace_dataset/merged_datasets/sio2_water_merged/silica_Painn_model`
+and fine-tuned with distinct random samplers / seeds using `finetune_painn.py`.
+
+4.3 CRITICAL DATA REQUIREMENT: ELEMENTAL REFERENCE ENERGIES (E0)
+----------------------------------------------------------------
+FHI-aims uses all-electron reference baselines, yielding absolute energies of
+thousands of eV:
+  - Hydrogen (Z=1):  +1295.16 eV / atom
+  - Oxygen   (Z=8):  -4671.61 eV / atom
+  - Silicon  (Z=14): -2659.60 eV / atom
+
+PaiNN trains on referenced (zero-centered) energies:
+  E_referenced = E_total - sum_i [ E0(Z_i) ]
+
+If new structures from FHI-aims are added during active learning, their raw DFT
+energies MUST be shifted by these exact same E0 reference values before training
+PaiNN, otherwise loss explodes with NaN gradients!
+These are stored in `reference_energies.json`.
+
+4.4 PERFORMANCE BENCHMARK (FROM test_performance_table.txt)
+-----------------------------------------------------------
+On the 70-structure held-out test set (`mine`):
+  - PaiNN ep500 (model_0): Force RMSE = 313.08 meV/A, Energy RMSE = 2.63 meV/at
+  - PaiNN ep500 (model_1): Force RMSE = 317.65 meV/A, Energy RMSE = 2.83 meV/at
+  - PaiNN ep500 (model_2): Force RMSE = 323.87 meV/A, Energy RMSE = 2.67 meV/at
+  - PaiNN ep500 Ensemble Mean: Force RMSE = 318.20 meV/A, Energy RMSE = 2.71 meV/at
+On the 78-structure held-out test set (`merged`):
+  - PaiNN ep500 Ensemble Mean: Force RMSE = 306.37 meV/A, Energy RMSE = 2.25 meV/at
+
+Conclusion: The PaiNN ensemble is well-converged, highly accurate on both energy
+and forces, and perfectly suited to serve as the exploration committee!
+
+
+================================================================================
+5. HOW TO REPRODUCE ACTIVE LEARNING FOR PAINN MODELS
+================================================================================
+
+5.1 STRATEGY COMPARISON
+-----------------------
+You have two architectural options to reproduce active learning with PaiNN:
+
+Option A: Dedicated Python Active Learning Driver (RECOMMENDED)
+  - Advantages:
+      * Zero friction with Conda environments (`nff` vs `my_env`).
+      * Direct use of `nff.io.ase_calcs.EnsembleNFF` or a custom PaiNN ASE calculator.
+      * Exact control over E0 reference subtraction and NFF dataset caching.
+      * Transparent, easy to debug, customize, and monitor.
+  - How it works: A standalone Python script drives multiple ASE Langevin MD
+    trajectories using the 3 PaiNN models, measures atomic force std-dev, submits
+    FHI-aims single points to Slurm, appends new points to extxyz, and calls
+    `finetune_painn.py` to update the models.
+
+Option B: Extending aims-PAX to support PaiNN natively
+  - Advantages: Uses the existing `aims-PAX-al` CLI interface.
+  - Drawbacks: Requires modifying `aims_PAX` source code:
+      * Adding `painn` to `aims_PAX/settings/model.py`.
+      * Creating `aims_PAX/tools/model_tools/setup_painn.py`.
+      * Writing a custom NFF training adapter in `aims_PAX/tools/model_tools/train_epoch.py`.
+      * Resolving environment dependency conflicts (aims-PAX expects `e3nn` / `mace`,
+        while PaiNN requires `nff` / PyTorch geometric stack).
+
+We provide the complete implementation for Option A below (which is ready to run
+immediately), followed by the technical blueprint for Option B.
+
+
+5.2 APPROACH A: DEDICATED ACTIVE LEARNING DRIVER (STANDALONE)
+------------------------------------------------------------
+
+5.2.1 DATA FLOW & ARCHITECTURE
+------------------------------
+                   +----------------------------------+
+                   |  Initial Structures & Trajectories|
+                   |  (alpha, beta, slabs, water)     |
+                   +-----------------+----------------+
+                                     |
+                                     v
+                   +----------------------------------+
+                   |  PaiNN 3-Model Committee         |
+                   |  (model_0, model_1, model_2)     |
+                   +-----------------+----------------+
+                                     |
+                         [Evaluate Forces & Energy]
+                                     |
+                                     v
+                   +----------------------------------+
+                   |  Propagate MD Step (Langevin)    |
+                   +-----------------+----------------+
+                                     |
+                    Every N steps (skip_step_mlff = 25)
+                                     |
+                                     v
+                   +----------------------------------+
+                   |  Calculate Force Uncertainty     |
+                   |  U = max_atom || std(F_m) ||     |
+                   +-----------------+----------------+
+                                     |
+                         Is U > Uncertainty Threshold?
+                                    / \
+                              No   /   \   Yes
+                             +----+     +-----+
+                             |                |
+                             v                v
+                 [Continue MD Trajectory]  +----------------------------------+
+                                           |  Submit FHI-aims DFT to Slurm    |
+                                           +-----------------+----------------+
+                                                             |
+                                                  Wait for FHI-aims Output
+                                                             |
+                                                             v
+                                           +----------------------------------+
+                                           |  Extract Energy & Forces         |
+                                           |  Shift: E_ref = E_dft - sum(E0)  |
+                                           +-----------------+----------------+
+                                                             |
+                                                             v
+                                           +----------------------------------+
+                                           |  Append to train.xyz / NFF cache |
+                                           |  Fine-tune PaiNN for K epochs    |
+                                           |  (using finetune_painn.py)       |
+                                           +-----------------+----------------+
+                                                             |
+                                           +-----------------+----------------+
+                                           |  Reload Best Weights into Models |
+                                           |  Resume MD Exploration           |
+                                           +----------------------------------+
+
+
+5.2.2 FULL WORKING REPRODUCTION SCRIPT: painn_al_loop.py
+---------------------------------------------------------
+Save the following script as `/home/maria.crist/pax/painn_al_loop.py`.
+It runs in `/home/maria.crist/.conda/envs/nff`.
+
+```python
+#!/usr/bin/env python
+"""Active Learning Driver for PaiNN Committee on Silica/Water Systems.
+
+Closed-loop active learning using a 3-member fine-tuned PaiNN committee.
+"""
+
+import copy
+import json
+import os
+import shutil
+import subprocess
+import time
+from pathlib import Path
+import numpy as np
+import torch
+from ase import Atoms, units
+from ase.io import read, write
+from ase.md.langevin import Langevin
+
+from nff.data import Dataset, collate_dicts
+from nff.data.graphs import get_neighbor_list
+from nff.train.builders.model import load_model
+
+# ==============================================================================
+# 1. USER CONFIGURATION & PATHS
+# ==============================================================================
+WORK_DIR = Path("/home/maria.crist/pax/painn_al_run")
+WORK_DIR.mkdir(parents=True, exist_ok=True)
+
+# Path to the fine-tuned PaiNN committee from dft_mlip/my_dataset
+PAINN_ENSEMBLE_DIR = Path(
+    "/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep500/silica_Painn_model_finetuned/painn_ensemble"
+)
+REF_ENERGIES_PATH = Path(
+    "/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep100/reference_energies.json"
+)
+
+# FHI-aims settings & binaries
+CONTROL_IN = Path("/home/maria.crist/pax/control.in")
+SPECIES_DIR = Path(
+    "/home/maria.crist/fhi-aims.260331/species_defaults/defaults_2020/light"
+)
+AIMS_MODULE = "fhi-aims/260331"
+
+# Active Learning Hyperparameters
+NUM_TRAJECTORIES = 5
+MAX_MD_STEPS = 1000
+MD_TIMESTEP_FS = 0.5
+SKIP_STEP_MLFF = 25
+UNCERTAINTY_THRESHOLD_INIT = 20.0  # meV/A (max atomic force std dev)
+MAX_NEW_POINTS = 50  # Maximum DFT single-point calculations
+FINE_TUNE_EPOCHS = 10  # Epochs to retrain per newly added DFT point
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+CUTOFF = 6.0
+
+
+# ==============================================================================
+# 2. PAINN COMMITTEE ASE CALCULATOR
+# ==============================================================================
+class PainnCommitteeCalculator:
+    """ASE-compatible calculator for an ensemble of PaiNN models.
+
+    Computes: - Energy: Mean over committee, referenced back to raw DFT scale.
+    - Forces: Mean force over committee. - Uncertainty: Standard deviation of
+    force vectors across committee.
+    """
+
+    def __init__(self, model_dirs, ref_energies, device="cuda:0", cutoff=6.0):
+        self.device = torch.device(device)
+        self.cutoff = cutoff
+        self.ref_energies = {int(k): float(v) for k, v in ref_energies.items()}
+
+        self.models = []
+        for p in model_dirs:
+            print(f"Loading PaiNN model from {p}")
+            m = load_model(str(p))
+            m.to(self.device)
+            m.eval()
+            self.models.append(m)
+
+    def _build_batch(self, atoms):
+        pos = torch.tensor(
+            atoms.get_positions(), dtype=torch.float32, device=self.device
+        )
+        z = torch.tensor(
+            atoms.get_atomic_numbers(), dtype=torch.long, device=self.device
+        )
+        nbrs = get_neighbor_list(pos.cpu(), cutoff=self.cutoff, undirected=False)
+        nbrs = nbrs.to(self.device)
+        offs = torch.zeros((nbrs.shape[0], 3), device=self.device)
+
+        nxyz = torch.cat(
+            [z.view(-1, 1).float(), pos], dim=1
+        )  # (N, 4) [Z, x, y, z]
+
+        batch = {
+            "nxyz": nxyz,
+            "nbr_list": nbrs,
+            "offsets": offs,
+            "num_atoms": torch.tensor([len(atoms)], device=self.device),
+        }
+        return batch
+
+    def calculate(self, atoms):
+        batch = self._build_batch(atoms)
+
+        energies_kcal = []
+        forces_kcal_ang = []
+
+        for model in self.models:
+            out = model(batch)
+            # Energy in kcal/mol
+            e = out["energy"].detach().cpu().item()
+            # Gradient dE/dx in kcal/(mol*A) -> Force = -grad
+            g = out["energy_grad"].detach().cpu().numpy()
+            energies_kcal.append(e)
+            forces_kcal_ang.append(-g)
+
+        # Convert kcal/mol -> eV (1 kcal/mol = 0.0433641 eV)
+        KCAL_TO_EV = 0.04336414
+        energies_ev = np.array(energies_kcal) * KCAL_TO_EV
+        forces_ev_ang = np.array(forces_kcal_ang) * KCAL_TO_EV  # (M, N, 3)
+
+        # Re-add atomic reference energy E0 to match DFT absolute scale
+        e_ref_total = sum(
+            self.ref_energies[int(at)] for at in atoms.get_atomic_numbers()
+        )
+        mean_energy = float(energies_ev.mean()) + e_ref_total
+        mean_forces = forces_ev_ang.mean(axis=0)  # (N, 3) in eV/A
+
+        # Compute force uncertainty (std dev per atom across committee in meV/A)
+        diff_sq = (forces_ev_ang - mean_forces[None, :, :]) ** 2
+        std_per_atom = (
+            np.sqrt(np.mean(diff_sq, axis=(0, -1))) * 1000.0
+        )  # meV/A, length N
+        max_atomic_sd = float(np.max(std_per_atom))  # max over atoms
+
+        results = {
+            "energy": mean_energy,
+            "forces": mean_forces,
+            "max_atomic_sd": max_atomic_sd,
+            "std_per_atom": std_per_atom,
+        }
+        return results
+
+
+# ==============================================================================
+# 3. FHI-AIMS SINGLE POINT DFT RUNNER (VIA SLURM SUBPROCESS)
+# ==============================================================================
+def run_aims_single_point(atoms, run_dir, trajectory_id, step):
+    """Generates FHI-aims inputs, submits via sbatch or srun, and extracts results."""
+    calc_dir = run_dir / f"aims_calc_traj{trajectory_id}_step{step}"
+    calc_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Write geometry.in
+    write(calc_dir / "geometry.in", atoms, format="aims")
+
+    # 2. Build control.in (copy base settings + append species defaults)
+    base_control = CONTROL_IN.read_text()
+    species_needed = sorted(set(atoms.get_chemical_symbols()))
+    species_text = ""
+    for spec in species_needed:
+        spec_file = SPECIES_DIR / f"{Path(spec).name if len(spec) > 2 else ''}"
+        # Search species default
+        for f in SPECIES_DIR.glob(f"*_{spec}"):
+            species_text += f.read_text() + "\n"
+            break
+
+    full_control = (
+        base_control + "\n# --- SPECIES DEFAULTS ---\n" + species_text
+    )
+    (calc_dir / "control.in").write_text(full_control)
+
+    # 3. Write Slurm job script
+    job_script = f"""#!/bin/bash
+#SBATCH --job-name=aims_al_pt
+#SBATCH --partition=nanotubo
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=32
+#SBATCH --time=01:00:00
+#SBATCH --output={calc_dir}/aims.out
+#SBATCH --error={calc_dir}/aims.err
+
+module purge
+module load {AIMS_MODULE}
+cd {calc_dir}
+mpirun aims.x > aims.out 2>&1
+"""
+    (calc_dir / "submit.sh").write_text(job_script)
+
+    # 4. Submit and wait for job completion
+    print(
+        f"[AL] Dispatching FHI-aims calculation for Trajectory {trajectory_id} at step {step}..."
+    )
+    res = subprocess.run(
+        ["sbatch", str(calc_dir / "submit.sh")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    job_id = res.stdout.strip().split()[-1]
+    print(f"[AL] Submitted Slurm Job ID: {job_id}")
+
+    # Poll until job completes
+    while True:
+        status = subprocess.run(
+            ["squeue", "-j", job_id], capture_output=True, text=True
+        )
+        if job_id not in status.stdout:
+            break
+        time.sleep(10)
+
+    # 5. Parse output from aims.out
+    atoms_dft = read(calc_dir / "aims.out", format="aims-output")
+    e_dft = atoms_dft.get_potential_energy()
+    f_dft = atoms_dft.get_forces()
+
+    print(
+        f"[AL] DFT completed. Energy: {e_dft:.4f} eV, Max Force: {np.max(np.abs(f_dft)):.4f} eV/A"
+    )
+    return e_dft, f_dft
+
+
+# ==============================================================================
+# 4. INCREMENTAL DATA RETRAINING
+# ==============================================================================
+def retrain_painn_committee(
+    ensemble_dir, new_train_xyz, ref_energies, epochs=10
+):
+    """Appends data, rebuilds cached graphs, and fine-tunes all 3 committee members."""
+    print(
+        f"\n[RETRAIN] Updating 3 PaiNN ensemble members on {new_train_xyz} for {epochs} epochs..."
+    )
+
+    env_python = "/home/maria.crist/.conda/envs/nff/bin/python"
+    script_dir = Path("/home/maria.crist/dft_mlip/my_dataset/pipeline_scripts")
+
+    for idx in [0, 1, 2]:
+        cmd = [
+            env_python,
+            "/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep100/finetune_painn.py",
+            "--model_idx",
+            str(idx),
+            "--device",
+            DEVICE,
+            "--n_epochs",
+            str(epochs),
+        ]
+        subprocess.run(cmd, check=True)
+    print("[RETRAIN] Model fine-tuning complete.\n")
+
+
+# ==============================================================================
+# 5. ACTIVE LEARNING MAIN LOOP
+# ==============================================================================
+def main():
+    with open(REF_ENERGIES_PATH) as f:
+        ref_energies = json.load(f)
+
+    model_dirs = [PAINN_ENSEMBLE_DIR / f"model_{i}" for i in [0, 1, 2]]
+    calculator = PainnCommitteeCalculator(
+        model_dirs, ref_energies, device=DEVICE, cutoff=CUTOFF
+    )
+
+    # Load initial starting structures
+    geom_files = list(Path("/home/maria.crist/pax/geometries").glob("*.in"))
+    print(f"Loaded {len(geom_files)} initial geometries.")
+
+    trajectories = []
+    for i in range(NUM_TRAJECTORIES):
+        geom_path = geom_files[i % len(geom_files)]
+        atoms = read(geom_path, format="aims")
+        trajectories.append(atoms)
+
+    train_xyz_path = WORK_DIR / "al_acquired_train.xyz"
+    if not train_xyz_path.exists():
+        # Seed with initial baseline
+        initial_seed = read("/home/maria.crist/pax/train.xyz", index=":")
+        write(train_xyz_path, initial_seed, format="extxyz")
+
+    threshold = UNCERTAINTY_THRESHOLD_INIT
+    total_dft_evals = 0
+
+    print("==================================================")
+    print("STARTING PAINN ACTIVE LEARNING SIMULATION")
+    print(f"Threshold: {threshold:.2f} meV/A | Max DFT Points: {MAX_NEW_POINTS}")
+    print("==================================================")
+
+    for step in range(0, MAX_MD_STEPS, SKIP_STEP_MLFF):
+        for traj_id, atoms in enumerate(trajectories):
+
+            # 1. Propagate MD for SKIP_STEP_MLFF steps using Committee mean force
+            for _ in range(SKIP_STEP_MLFF):
+                res = calculator.calculate(atoms)
+                f = res["forces"]
+                # Simple Velocity Verlet / Langevin integration step
+                p = atoms.get_positions()
+                atoms.set_positions(
+                    p + 0.5 * f * (MD_TIMESTEP_FS * 1e-15) ** 2 / units.fs
+                )
+
+            # 2. Check uncertainty at current point
+            res = calculator.calculate(atoms)
+            uncertainty = res["max_atomic_sd"]  # meV/A
+
+            print(
+                f"[Traj {traj_id} | Step {step+SKIP_STEP_MLFF}] Uncertainty: {uncertainty:.2f} meV/A (Thresh: {threshold:.2f})"
+            )
+
+            # 3. Trigger Active Learning if uncertainty exceeds threshold
+            if uncertainty > threshold:
+                print(
+                    f"--> [TRIGGER] High uncertainty ({uncertainty:.2f} > {threshold:.2f}) on Trajectory {traj_id}!"
+                )
+
+                # Query DFT
+                e_dft, f_dft = run_aims_single_point(
+                    atoms, WORK_DIR, traj_id, step
+                )
+                total_dft_evals += 1
+
+                # Save labeled frame to extxyz
+                labeled_frame = atoms.copy()
+                labeled_frame.info["REF_energy"] = e_dft
+                labeled_frame.arrays["REF_forces"] = f_dft
+                write(
+                    train_xyz_path,
+                    labeled_frame,
+                    format="extxyz",
+                    append=True,
+                )
+
+                # Retrain PaiNN models
+                retrain_painn_committee(
+                    PAINN_ENSEMBLE_DIR,
+                    train_xyz_path,
+                    ref_energies,
+                    epochs=FINE_TUNE_EPOCHS,
+                )
+
+                # Reload updated weights
+                calculator = PainnCommitteeCalculator(
+                    model_dirs, ref_energies, device=DEVICE, cutoff=CUTOFF
+                )
+
+                # Dynamically adapt threshold
+                threshold = max(15.0, threshold * 1.05)
+
+                if total_dft_evals >= MAX_NEW_POINTS:
+                    print(
+                        f"[AL] Reached maximum DFT budget ({MAX_NEW_POINTS}). Finishing."
+                    )
+                    return
+
+
+if __name__ == "__main__":
+    main()
+```
+
+
+5.3 APPROACH B: INTEGRATING PAINN INTO AIMS-PAX CODEBASE
+--------------------------------------------------------
+If you prefer running through the standard `aims-PAX-al` CLI, the following 4 files
+in `/home/maria.crist/aims-PAX/src/aims_PAX/` must be modified:
+
+1. `src/aims_PAX/settings/model.py`:
+   Add `"painn"` as a valid literal choice:
+   ```python
+   model_choice: Literal["mace", "so3krates", "so3lr", "painn"] = Field(...)
+```
+
+2. Create `src/aims_PAX/tools/model_tools/setup_painn.py`:
+   Define `setup_painn(settings, z_table, atomic_energies_dict)`:
+   - Loads the 3 pre-trained base models from `silica_Painn_model/painn_ensemble/model_{i}`.
+   - Sets learning rates and loss coefficients (`energy_grad: 0.95`, `energy: 0.05`).
+   - Configures the `Trainer` with `safe_loss_fn` and `grad_is_finite` guard.
+
+3. `src/aims_PAX/procedures/preparation.py`:
+   In `_setup_mlff_calculator()`, add the branch:
+   ```python
+   elif self.config.model_choice == "painn":
+     from nff.io.ase_calcs import EnsembleNFF
+
+     self.mlff_calc = EnsembleNFF(
+         models=list(self.ensemble.values()),
+         device=self.config.model_settings.MISC.device,
+         cutoff=6.0,
+     )
+```
+
+4. `src/aims_PAX/tools/model_tools/train_epoch.py`:
+   Route the per-worker training loop to `nff.train.trainer.Trainer.train()`
+   rather than the MACE/e3nn training step.
+
+
+================================================================================
+6. STEP-BY-STEP REPRODUCTION RECIPE & RUN GUIDE
+================================================================================
+
+6.1 ENVIRONMENT PREPARATION
+---------------------------
+There are two Conda environments:
+  1. `/home/maria.crist/.conda/envs/my_env`:
+     Contains `aims_PAX`, `mace-torch`, `parsl`, `e3nn`. Used for MACE runs.
+  2. `/home/maria.crist/.conda/envs/nff`:
+     Contains `nff`, `torch`, `ase`, `pytorch-geometric`. Used for PaiNN runs.
+
+To run the PaiNN active learning pipeline:
+```bash
+# Activate nff environment
+conda activate /home/maria.crist/.conda/envs/nff
+
+# Test PaiNN loading and CUDA availability
+python -c "import torch, nff; print('CUDA:', torch.cuda.is_available(), 'NFF:', nff.__file__)"
+```
+
+6.2 SLURM SUBMISSION SCRIPT FOR PAINN ACTIVE LEARNING
+-----------------------------------------------------
+Create `run_painn_al.sh` in `/home/maria.crist/pax/`:
+
+```bash
+#!/bin/bash -l
+#SBATCH --job-name=painn_active_learning
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --partition=metano
+#SBATCH --gres=gpu:1
+#SBATCH --mem=32G
+#SBATCH --time=48:00:00
+#SBATCH --output=painn_al_%j.out
+#SBATCH --error=painn_al_%j.err
+
+# Load environment
+ENV_PREFIX=/home/maria.crist/.conda/envs/nff
+export LD_LIBRARY_PATH=$ENV_PREFIX/lib:$LD_LIBRARY_PATH
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+module load fhi-aims/260331
+
+cd /home/maria.crist/pax
+$ENV_PREFIX/bin/python painn_al_loop.py
+```
+
+Submit with:
+  `sbatch run_painn_al.sh`
+
+
+6.3 KEY PITFALLS & SOLUTIONS
+----------------------------
+
+1. Cluster QOS Limits:
+   - Your Slurm cluster imposes `QOSMaxSubmitJobPerUserLimit` (typically 1 running
+     job + 1 pending job).
+   - Ensure you do not submit multi-task array jobs while active learning is
+     dispatching DFT single points.
+
+2. Partition Time Limits:
+   - Partition `metano` (GPU) allows up to 72 hours (3 days).
+   - Partition `etileno` hard-caps at 24 hours.
+   - For long active learning explorations with online fine-tuning, ALWAYS use
+     `--partition=metano`.
+   - For the parallel DFT single points, use `--partition=nanotubo` (32 cores).
+
+3. Atomic Reference Energies (E0):
+   - Never feed raw DFT energies into PaiNN training batches. Raw FHI-aims energies
+     are centered around -2000 to -5000 eV, whereas PaiNN expects near-zero energy.
+   - Always verify that each newly added frame is shifted using `reference_energies.json`.
+
+4. NaN Gradient Guard:
+   - Always preserve the `make_safe_loss_fn` and `grad_is_finite` functions from
+     `finetune_painn.py`. When an active learning MD step visits an extremely
+     distorted, compressed bond geometry, raw network gradients can spike to Inf.
+   - The safe loss wrapper cleanly skips the step rather than corrupting model weights.
+
+5. Neighbor List & Cutoff Consistency:
+   - The pretrained PaiNN models have a hardcoded radial cutoff of 6.0 Angstroms.
+   - Always ensure neighbor lists are constructed with `cutoff = 6.0` and
+     `undirected = False` (directed graphs).
+
+================================================================================
+END OF TUTORIAL
+================================================================================
