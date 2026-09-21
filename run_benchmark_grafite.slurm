@@ -27,6 +27,9 @@ ulimit -s unlimited
 export OMP_NUM_THREADS=2
 export MKL_NUM_THREADS=2
 
+# Force CPU execution on CPU-only partition (prevents using other users' GPUs on shared node)
+export CUDA_VISIBLE_DEVICES=""
+
 ENV_PREFIX=/home/maria.crist/.conda/envs/nff
 export LD_LIBRARY_PATH=$ENV_PREFIX/lib:$LD_LIBRARY_PATH
 
