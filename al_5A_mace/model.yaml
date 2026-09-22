@@ -1,0 +1,30 @@
+GENERAL:
+  name_exp: mace_5A_al
+  checkpoints_dir: ./checkpoints
+  model_dir: ./model
+  default_dtype: float64
+  compute_stress: False
+  seed: 100
+
+ARCHITECTURE:
+  model_choice: mace
+  r_max: 5.0
+  num_channels: 128
+  max_L: 1
+  radial_MLP:
+  - 64
+  - 64
+  - 64
+
+TRAINING:
+  batch_size: 4
+  valid_batch_size: 4
+  lr: 0.001
+  amsgrad: True
+  optimizer: adam
+  loss: weighted
+  energy_weight: 1.0
+  forces_weight: 100.0
+
+MISC:
+  device: cuda

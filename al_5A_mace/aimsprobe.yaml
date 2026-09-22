@@ -1,0 +1,40 @@
+ACTIVE_LEARNING:
+  species_dir: /home/maria.crist/fhi-aims.260331/species_defaults/defaults_2020/light
+  num_trajectories: 3
+  ensemble_size: 3
+  max_MD_steps: 10000
+  max_train_set_size: 200
+  converge_al: true
+  intermediate_epochs_al: 1
+  epochs_per_worker: 1
+  initial_train_dataset: /home/maria.crist/dft_mlip/my_dataset/mine/model_0_ep500/train.xyz
+  initial_valid_dataset: /home/maria.crist/dft_mlip/my_dataset/mine/model_0_ep500/val.xyz
+
+MD:
+  0:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 300
+    timestep: 0.0005
+  1:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 300
+    timestep: 0.0005
+  2:
+    stat_ensemble: nvt
+    thermostat: langevin
+    temperature: 300
+    timestep: 0.0005
+
+MISC:
+  path_to_geometry: /home/maria.crist/dft_mlip/sep_pax/al_5A_mace/geometries/
+  path_to_control: /home/maria.crist/dft_mlip/sep_pax/al_5A_mace/control.in
+  create_restart: true
+
+CLUSTER:
+  type: local
+  executor: local
+  max_workers: 1
+  launch_str: "mpirun -np 32 aims.x"
+  calc_dir: /home/maria.crist/dft_mlip/sep_pax/al_5A_mace/aims_ase_calcs

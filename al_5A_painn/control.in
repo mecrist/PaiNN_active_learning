@@ -1,0 +1,17 @@
+# XC — must match across ALL four systems
+xc                    pbe
+vdw_correction_hirshfeld
+spin                  none
+relativistic          atomic_zora scalar
+charge                0.
+wf_extrapolation polynomial 3 1
+
+# K-points — Γ-only appropriate for your large slab+water/box cells
+k_grid                1 1 1
+
+# SCF convergence — stability knobs, can vary per system
+adjust_scf            always 3
+sc_accuracy_rho       1E-3
+sc_accuracy_eev       1E-2
+sc_accuracy_etot      1E-5
+sc_accuracy_forces    1E-3
