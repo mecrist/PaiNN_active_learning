@@ -43,7 +43,7 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 
 from painn_ensemble_calc import PainnEnsembleCalculator, KCAL_TO_EV
 from lammps_dumps import write_lammps_dump
-from dft_interface import run_fhi_aims_single_point
+from dft_interface import run_aims_single_point
 from retrain_engine import retrain_ensemble
 
 # Paths
@@ -215,46 +215,44 @@ class PainnActiveLearningManager5A:
         print(f">>> Uncertainty: {u_value:.2f} meV/A > Threshold: {self.u_thresh:.2f} meV/A")
         print("=" * 80)
 
-        # 1. Run FHI-aims single point
-        dft_atoms = run_fhi_aims_single_point(
+        # 1. Run FHI-aims single point (32 cores)
+        e_dft, f_dft, calc_dir = run_aims_single_point(
             atoms=atoms,
+            dft_root_dir=self.dft_dir,
             step=self.step,
             traj_idx=traj_idx,
-            base_dir=self.base_dir,
-            control_template=CONTROL_IN,
+            control_in_path=CONTROL_IN,
             species_dir=SPECIES_DIR,
             aims_bin=AIMS_BIN,
-            num_cores=32,
+            n_cores=32,
         )
 
-        # 2. Append to dataset
-        write(str(self.dataset_file), dft_atoms, append=True)
+        # 2. Append labeled frame to dataset
+        labeled_atoms = atoms.copy()
+        labeled_atoms.info["REF_energy"] = e_dft
+        labeled_atoms.arrays["REF_forces"] = f_dft
+        write(str(self.dataset_file), labeled_atoms, format="extxyz", append=True)
 
         # 3. Dynamic relaxation of threshold
         self.u_thresh = max(MIN_U_THRESH, self.u_thresh * THRESH_RELAX_FACTOR)
         print(f"[AL-Manager] Relaxed uncertainty threshold to {self.u_thresh:.2f} meV/A")
 
         # 4. Retrain 3 PaiNN models (1 epoch)
-        next_ckpt_dir = self.ckpt_dir / f"cycle_{self.cycle:02d}"
-        print(f"[AL-Manager] Retraining 3 PaiNN models for 1 epoch -> {next_ckpt_dir.name}...")
-        self.current_model_dirs = retrain_ensemble(
-            model_dirs=self.current_model_dirs,
-            train_dataset_path=self.dataset_file,
-            output_dir=next_ckpt_dir,
+        print(f"[AL-Manager] Retraining 3 PaiNN models for 1 epoch (Cycle {self.cycle})...")
+        updated_paths = retrain_ensemble(
+            calculator=self.calc,
+            dataset_path=self.dataset_file,
             ref_energies=REF_ENERGIES,
+            checkpoint_dir=self.ckpt_dir,
+            cycle=self.cycle,
             n_epochs=1,
             batch_size=4,
             lr=1e-4,
             device=self.device,
         )
+        self.current_model_dirs = [Path(p) for p in updated_paths]
 
-        # 5. Reload updated models into calculator
-        self.calc = PainnEnsembleCalculator(
-            model_dirs=self.current_model_dirs,
-            ref_energies=REF_ENERGIES,
-            cutoff=6.0,
-            device=self.device,
-        )
+        # 5. Ensure updated calculator is bound to all trajectories
         for t in self.trajectories:
             t["atoms"].calc = self.calc
 

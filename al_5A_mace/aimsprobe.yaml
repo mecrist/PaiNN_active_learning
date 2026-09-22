@@ -3,8 +3,8 @@ ACTIVE_LEARNING:
   num_trajectories: 3
   ensemble_size: 3
   max_MD_steps: 10000
-  max_train_set_size: 200
-  converge_al: true
+  max_train_set_size: 540
+  converge_al: false
   intermediate_epochs_al: 1
   epochs_per_worker: 1
   initial_train_dataset: /home/maria.crist/dft_mlip/my_dataset/mine/model_0_ep500/train.xyz

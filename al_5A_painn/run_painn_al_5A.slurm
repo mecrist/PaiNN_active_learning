@@ -36,7 +36,7 @@ cd /home/maria.crist/dft_mlip/sep_pax/al_5A_painn
 
 nvidia-smi
 
-$ENV_PREFIX/bin/python run_painn_al_5A.py
+$ENV_PREFIX/bin/python -u run_painn_al_5A.py
 
 echo "=========================================================="
 echo "PaiNN Active Learning (5 A Gap) completed at $(date)"
