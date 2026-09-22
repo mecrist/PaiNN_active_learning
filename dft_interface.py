@@ -43,6 +43,14 @@ def prepare_control_in(base_control_path, species_dir, chemical_symbols, output_
     Path(output_path).write_text(full_control)
 
 
+class AimsCalculationError(RuntimeError):
+    """Raised when an FHI-aims single-point calculation or output parsing fails."""
+    def __init__(self, message, calc_dir, log_snippet=""):
+        super().__init__(message)
+        self.calc_dir = Path(calc_dir)
+        self.log_snippet = log_snippet
+
+
 def run_aims_single_point(
     atoms,
     dft_root_dir,
@@ -95,15 +103,31 @@ def run_aims_single_point(
     )
 
     if res.returncode != 0 or not out_file.exists():
-        raise RuntimeError(
-            f"FHI-aims calculation failed in {calc_dir} with exit code {res.returncode}. "
-            f"Check {out_file} for error details."
+        snippet = ""
+        if out_file.exists():
+            lines = out_file.read_text().splitlines()
+            snippet = "\n".join(lines[-35:])
+        raise AimsCalculationError(
+            f"FHI-aims calculation failed in {calc_dir} with exit code {res.returncode}.",
+            calc_dir=calc_dir,
+            log_snippet=snippet,
         )
 
     # 5. Parse output using ASE aims parser
-    atoms_dft = read(out_file, format="aims-output")
-    e_dft = float(atoms_dft.get_potential_energy())
-    f_dft = np.array(atoms_dft.get_forces(), dtype=np.float64)
+    try:
+        atoms_dft = read(out_file, format="aims-output")
+        e_dft = float(atoms_dft.get_potential_energy())
+        f_dft = np.array(atoms_dft.get_forces(), dtype=np.float64)
+    except Exception as e:
+        snippet = ""
+        if out_file.exists():
+            lines = out_file.read_text().splitlines()
+            snippet = "\n".join(lines[-35:])
+        raise AimsCalculationError(
+            f"Failed to parse FHI-aims output in {calc_dir}: {str(e)}",
+            calc_dir=calc_dir,
+            log_snippet=snippet,
+        )
 
     max_f = float(np.max(np.abs(f_dft)))
     print(f"[DFT SUCCESS] Energy: {e_dft:.4f} eV | Max Force: {max_f:.4f} eV/A")

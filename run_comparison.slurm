@@ -1,6 +1,6 @@
 #!/bin/bash -l
 #SBATCH --job-name=mace_vs_painn
-#SBATCH --partition=etileno,metano
+#SBATCH --partition=etileno
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32

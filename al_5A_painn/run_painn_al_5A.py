@@ -43,7 +43,7 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 
 from painn_ensemble_calc import PainnEnsembleCalculator, KCAL_TO_EV
 from lammps_dumps import write_lammps_dump
-from dft_interface import run_aims_single_point
+from dft_interface import run_aims_single_point, AimsCalculationError
 from retrain_engine import retrain_ensemble
 
 # Paths
@@ -80,7 +80,7 @@ INITIAL_U_THRESH = 25.0
 MIN_U_THRESH = 20.0
 THRESH_RELAX_FACTOR = 1.02
 MAX_AL_CYCLES = 50
-DESIRED_ACC_FORCE_MAE = 180.0  # meV/A (target Force MAE on validation set to stop early; set None to disable)
+DESIRED_ACC_FORCE_MAE = 50.0  # meV/A (target Force MAE on validation set to stop early; set None to disable)
 
 
 class PainnActiveLearningManager5A:
@@ -92,7 +92,8 @@ class PainnActiveLearningManager5A:
         self.dataset_file = self.base_dir / "al_dataset.xyz"
         self.state_file = self.base_dir / "al_checkpoint.json"
 
-        for d in [self.dft_dir, self.ckpt_dir, self.traj_dir]:
+        self.failed_dir = self.base_dir / "failed_calculations"
+        for d in [self.dft_dir, self.ckpt_dir, self.traj_dir, self.failed_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -101,6 +102,7 @@ class PainnActiveLearningManager5A:
         self.step = 0
         self.active_traj_idx = 0
         self.accuracy_reached = False
+        self.last_checkpoints = {}
 
         self.setup_signal_handlers()
         self.initialize_dataset()
@@ -218,23 +220,65 @@ class PainnActiveLearningManager5A:
         print(f">>> Uncertainty: {u_value:.2f} meV/A > Threshold: {self.u_thresh:.2f} meV/A")
         print("=" * 80)
 
-        # 1. Run FHI-aims single point (32 cores)
-        e_dft, f_dft, calc_dir = run_aims_single_point(
-            atoms=atoms,
-            dft_root_dir=self.dft_dir,
-            step=self.step,
-            traj_idx=traj_idx,
-            control_in_path=CONTROL_IN,
-            species_dir=SPECIES_DIR,
-            aims_bin=AIMS_BIN,
-            n_cores=32,
-        )
+        # 1. Run FHI-aims single point (32 cores) with failure capture
+        try:
+            e_dft, f_dft, calc_dir = run_aims_single_point(
+                atoms=atoms,
+                dft_root_dir=self.dft_dir,
+                step=self.step,
+                traj_idx=traj_idx,
+                control_in_path=CONTROL_IN,
+                species_dir=SPECIES_DIR,
+                aims_bin=AIMS_BIN,
+                n_cores=32,
+            )
+        except AimsCalculationError as err:
+            self.cycle -= 1
+            print("\n" + "!" * 80)
+            print(f">>> [CALCULATION FAILED] FHI-aims failed on Trajectory {traj_idx} ({self.trajectories[traj_idx]['name']}) at step {self.step}!")
+            print(f">>> Preserving failed calculation in '{self.failed_dir.name}/' for investigation.")
+            print("!" * 80 + "\n")
+
+            failed_target = self.failed_dir / f"step_{self.step:06d}_traj_{traj_idx}_{self.trajectories[traj_idx]['name']}"
+            if err.calc_dir.exists():
+                if failed_target.exists():
+                    shutil.rmtree(failed_target)
+                shutil.move(str(err.calc_dir), str(failed_target))
+
+            log_entry = (
+                f"\n{'=' * 80}\n"
+                f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Trajectory: {traj_idx} ({self.trajectories[traj_idx]['name']}) | MD Step: {self.step}\n"
+                f"Uncertainty: {u_value:.2f} meV/A | Threshold: {self.u_thresh:.2f} meV/A\n"
+                f"Preserved Folder: {failed_target}\n"
+                f"Error Message: {err}\n"
+                f"--- aims.out Error Snippet ---\n"
+                f"{err.log_snippet}\n"
+                f"{'=' * 80}\n"
+            )
+            with open(self.failed_dir / "failed_calculations.log", "a") as f:
+                f.write(log_entry)
+
+            # Rollback trajectory to last safe checkpoint
+            if traj_idx in self.last_checkpoints:
+                safe_pos, safe_vel = self.last_checkpoints[traj_idx]
+                atoms.set_positions(safe_pos)
+                atoms.set_velocities(safe_vel)
+                print(f"[AL-Manager] Rolled back {self.trajectories[traj_idx]['name']} to last safe checkpoint.")
+
+            # Dynamic relaxation of threshold
+            self.u_thresh = max(MIN_U_THRESH, self.u_thresh * THRESH_RELAX_FACTOR)
+            print(f"[AL-Manager] Relaxed uncertainty threshold to {self.u_thresh:.2f} meV/A\n")
+            return
 
         # 2. Append labeled frame to dataset
         labeled_atoms = atoms.copy()
         labeled_atoms.info["REF_energy"] = e_dft
         labeled_atoms.arrays["REF_forces"] = f_dft
         write(str(self.dataset_file), labeled_atoms, format="extxyz", append=True)
+
+        # Update last known safe checkpoint
+        self.last_checkpoints[traj_idx] = (atoms.get_positions().copy(), atoms.get_velocities().copy())
 
         # 3. Dynamic relaxation of threshold
         self.u_thresh = max(MIN_U_THRESH, self.u_thresh * THRESH_RELAX_FACTOR)
