@@ -60,6 +60,7 @@ INITIAL_MODEL_DIRS = [
     Path("/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep500/silica_Painn_model_finetuned/painn_ensemble/model_2"),
 ]
 INITIAL_TRAIN_DATASET = Path("/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep500/train.xyz")
+INITIAL_VAL_DATASET = Path("/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep500/val.xyz")
 
 # Elemental Reference Energies (E0 in eV)
 REF_ENERGIES = {
@@ -79,6 +80,7 @@ INITIAL_U_THRESH = 25.0
 MIN_U_THRESH = 20.0
 THRESH_RELAX_FACTOR = 1.02
 MAX_AL_CYCLES = 50
+DESIRED_ACC_FORCE_MAE = 180.0  # meV/A (target Force MAE on validation set to stop early; set None to disable)
 
 
 class PainnActiveLearningManager5A:
@@ -98,6 +100,7 @@ class PainnActiveLearningManager5A:
         self.cycle = 0
         self.step = 0
         self.active_traj_idx = 0
+        self.accuracy_reached = False
 
         self.setup_signal_handlers()
         self.initialize_dataset()
@@ -256,12 +259,66 @@ class PainnActiveLearningManager5A:
         for t in self.trajectories:
             t["atoms"].calc = self.calc
 
+        # 6. Evaluate validation set & check desired_acc stopping criterion
+        val_f_mae, val_e_mae = self.evaluate_validation()
+        if val_f_mae is not None:
+            print(f"[AL-Manager] Cycle {self.cycle} Validation -> Force MAE: {val_f_mae:.2f} meV/A | Energy MAE: {val_e_mae:.2f} meV/atom")
+            if DESIRED_ACC_FORCE_MAE is not None and val_f_mae <= DESIRED_ACC_FORCE_MAE:
+                print("\n" + "*" * 80)
+                print(f">>> [TARGET REACHED] Validation Force MAE ({val_f_mae:.2f} meV/A) <= desired_acc ({DESIRED_ACC_FORCE_MAE:.2f} meV/A)!")
+                print(f">>> Active Learning converged successfully on accuracy criterion.")
+                print("*" * 80 + "\n")
+                self.accuracy_reached = True
+
         self.save_checkpoint()
+
+    def evaluate_validation(self):
+        """
+        Evaluates the committee on the held-out validation set to compute Force MAE (meV/A)
+        and Energy MAE (meV/atom).
+        """
+        if not INITIAL_VAL_DATASET.exists():
+            return None, None
+
+        val_frames = read(str(INITIAL_VAL_DATASET), index=":")
+        f_maes = []
+        e_maes = []
+        for atoms in val_frames:
+            if "REF_forces" in atoms.arrays:
+                f_ref = atoms.arrays["REF_forces"]
+            elif "forces" in atoms.arrays:
+                f_ref = atoms.arrays["forces"]
+            else:
+                continue
+
+            if "REF_energy" in atoms.info:
+                e_ref = atoms.info["REF_energy"]
+            elif "energy" in atoms.info:
+                e_ref = atoms.info["energy"]
+            else:
+                e_ref = None
+
+            atoms.calc = self.calc
+            self.calc.calculate(atoms)
+            f_pred = self.calc.results["forces"]
+            f_mae = np.mean(np.abs(f_pred - f_ref)) * 1000.0  # meV/A
+            f_maes.append(f_mae)
+
+            if e_ref is not None:
+                e_pred = self.calc.results["energy"]
+                e_mae = abs(e_pred - e_ref) / len(atoms) * 1000.0  # meV/atom
+                e_maes.append(e_mae)
+
+        mean_f_mae = float(np.mean(f_maes)) if f_maes else None
+        mean_e_mae = float(np.mean(e_maes)) if e_maes else None
+        return mean_f_mae, mean_e_mae
 
     def run(self):
         print("\n==========================================================")
         print(f"STARTING PAINN ACTIVE LEARNING RUN ON 5 A GEOMETRIES")
         print(f"Max steps: {MAX_MD_STEPS} | T: {TEMPERATURE_K} K | Device: {self.device}")
+        if DESIRED_ACC_FORCE_MAE is not None:
+            print(f"Desired accuracy limit: {DESIRED_ACC_FORCE_MAE:.2f} meV/A Force MAE")
         print("==========================================================\n")
 
         dyn_drivers = []
@@ -275,7 +332,7 @@ class PainnActiveLearningManager5A:
             )
             dyn_drivers.append(dyn)
 
-        while self.step < MAX_MD_STEPS and self.cycle < MAX_AL_CYCLES:
+        while self.step < MAX_MD_STEPS and self.cycle < MAX_AL_CYCLES and not self.accuracy_reached:
             self.step += 1
 
             for i, t in enumerate(self.trajectories):
@@ -303,12 +360,20 @@ class PainnActiveLearningManager5A:
                 # Trigger condition
                 if u > self.u_thresh:
                     self.handle_uncertainty_trigger(traj_idx=i, atoms=atoms, u_value=u)
+                    if self.accuracy_reached:
+                        break
+
+            if self.accuracy_reached:
+                break
 
             if self.step % 500 == 0:
                 self.save_checkpoint()
 
         print("\n==========================================================")
-        print(f"PaiNN Active Learning Completed Successfully!")
+        if self.accuracy_reached:
+            print("Active Learning HALTED: Desired accuracy target achieved!")
+        else:
+            print(f"PaiNN Active Learning Completed Successfully!")
         print(f"Total Cycles: {self.cycle} | Final Steps: {self.step}")
         print("==========================================================")
 
