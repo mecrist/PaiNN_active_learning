@@ -28,8 +28,14 @@ from ase.io import read, write
 from ase.md.langevin import Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 
-from painn_ensemble_calc import PainnEnsembleCalculator, REF_ENERGIES
+from painn_ensemble_calc import PainnEnsembleCalculator, KCAL_TO_EV
 from mace_ensemble_calc import MaceEnsembleCalculator
+
+REF_ENERGIES = {
+    1: 1295.1619808355229,
+    8: -4671.611073387086,
+    14: -2659.5960319024257,
+}
 
 BASE_DIR = Path("/home/maria.crist/dft_mlip/sep_pax")
 GEOMETRIES_DIR = BASE_DIR / "geometries"
@@ -45,8 +51,8 @@ PAINN_MODEL_DIRS = [
 # 3-Member MACE Ensemble (trained on mine data, 500 epochs)
 MACE_MODEL_PATHS = [
     Path("/home/maria.crist/dft_mlip/my_dataset/mine/mace_ensemble/model_0/silica_water_mace.model"),
-    Path("/home/maria.crist/dft_mlip/my_dataset/mine/mace_ensemble/model_1/checkpoints/silica_water_mace_seed42.model"),
-    Path("/home/maria.crist/dft_mlip/my_dataset/mine/mace_ensemble/model_2/checkpoints/silica_water_mace_seed123.model"),
+    Path("/home/maria.crist/dft_mlip/my_dataset/mine/mace_ensemble/model_1/silica_water_mace_seed42.model"),
+    Path("/home/maria.crist/dft_mlip/my_dataset/mine/mace_ensemble/model_2/silica_water_mace_seed123.model"),
 ]
 
 GEOMETRY_FILES = [
@@ -94,7 +100,7 @@ def run_single_model_md(model_name, calc, initial_atoms, initial_velocities, rng
         epot = atoms.get_potential_energy()
         temp = atoms.get_temperature()
         u_max = atoms.calc.results.get("max_atomic_sd", 0.0)
-        stds = atoms.calc.results.get("atomic_stds", np.zeros(len(atoms)))
+        stds = atoms.calc.results.get("std_per_atom", atoms.calc.results.get("atomic_stds", np.zeros(len(atoms))))
         u_mean = float(np.mean(stds))
 
         max_idx = int(np.argmax(stds))

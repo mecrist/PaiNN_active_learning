@@ -77,5 +77,6 @@ class MaceEnsembleCalculator(Calculator):
         self.results["free_energy"] = mean_energy
         self.results["forces"] = mean_forces
         self.results["atomic_stds"] = atomic_stds
+        self.results["std_per_atom"] = atomic_stds
         self.results["max_atomic_sd"] = max_atomic_sd
         self.results["energies_committee"] = energies
