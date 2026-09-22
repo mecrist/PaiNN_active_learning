@@ -8,6 +8,7 @@ wf_extrapolation polynomial 3 1
 
 # K-points — Γ-only appropriate for your large slab+water/box cells
 k_grid                1 1 1
+override_kgrid_checks .true.
 
 # SCF convergence — stability knobs, can vary per system
 adjust_scf            always 3
