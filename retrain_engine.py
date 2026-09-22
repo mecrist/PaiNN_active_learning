@@ -68,12 +68,24 @@ def build_nff_dataset(atoms_list, ref_energies, cutoff=6.0):
         nxyz = np.concatenate([z.reshape(-1, 1), pos], axis=1)
 
         # Reference energy shift: E_ref = E_dft - sum(E0)
-        e_dft = atoms.info.get("REF_energy", atoms.get_potential_energy())
+        if "REF_energy" in atoms.info:
+            e_dft = atoms.info["REF_energy"]
+        elif "energy" in atoms.info:
+            e_dft = atoms.info["energy"]
+        else:
+            e_dft = atoms.get_potential_energy()
+
         e0_sum = sum(ref_energies[int(at)] for at in z)
         e_ref = e_dft - e0_sum
 
         # Force -> gradient: energy_grad = -Force
-        forces = atoms.arrays.get("REF_forces", atoms.get_forces())
+        if "REF_forces" in atoms.arrays:
+            forces = atoms.arrays["REF_forces"]
+        elif "forces" in atoms.arrays:
+            forces = atoms.arrays["forces"]
+        else:
+            forces = atoms.get_forces()
+
         energy_grad = -np.array(forces, dtype=np.float64)
 
         # Graph neighbor list
