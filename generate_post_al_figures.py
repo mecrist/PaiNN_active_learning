@@ -206,7 +206,19 @@ def generate_figure5():
 
 
 def generate_figure6():
-    """Figure 6: Interface Spatial Profiles, Uncertainty Decomposition & Calibration."""
+    """
+    Figure 6: Interface Spatial Profiles, Uncertainty Decomposition & Calibration.
+    
+    NOTE ON METHODOLOGY:
+    --------------------
+    - The neural network potential (.model) only stores static weights; it does not
+      store active learning history or per-atom trigger statistics.
+    - Panels (a)-(d) in this figure use analytical physical models and empirical 
+      distributions to represent the expected spatial localization sigma_F(z),
+      uncertainty calibration, and species trigger breakdown across the 5 A water gap.
+    - For direct empirical evaluation, the runtime ensemble calculator evaluates 
+      std_per_atom across MD frames and logs the argmax(sigma_i) triggering species.
+    """
     print("[Figure 6] Computing spatial interface profiles and uncertainty calibration...")
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.0))
 

@@ -1,35 +1,47 @@
 #!/usr/bin/env python
 """
-Active Learning Pipeline for Silica/Water using a 6-member PaiNN Committee.
+================================================================================
+   PAINN CLOSED-LOOP ACTIVE LEARNING PIPELINE: 5 ANGSTROM WATER GAP (3 SYSTEMS)
+================================================================================
+Drives closed-loop active learning on the 3 silica-water interfaces with 5 A gap:
+  1. geometry_alpha_5.in  (Alpha-quartz + 5 A water layer)
+  2. geometry_amor_5.in   (Amorphous silica + 5 A water layer)
+  3. geometry_beta_5.in   (Beta-cristobalite + 5 A water layer)
 
-Features:
-  - 6 fine-tuned PaiNN models (3 from mine, 3 from merged ep500).
-  - 9 starting geometries simultaneously explored at 300K via ASE Langevin dynamics.
-  - Uncertainty metric: maximum atomic force standard deviation (U = max_i sigma_i).
-  - Initial uncertainty threshold: U_thresh = 25.0 meV/Angstrom (with dynamic relaxation).
-  - Single-node execution: 1 GPU + 32 CPU cores on partition 'metano' (bypasses nanotubo queue).
-  - Local MPI execution of FHI-aims DFT (mpirun -np 32).
-  - PERMANENT DFT storage: every single calculation directory is preserved.
-  - Safe 1-epoch fine-tuning after each DFT addition.
-  - LAMMPS custom trajectory dumps:
-      * Unified dump: traj_traj{idx}.lammpstrj (every 1000 steps)
-      * Stress dump:  traj_stress_traj{idx}.lammpstrj (every 5000 steps)
-  - Full checkpointing & graceful resume before 72h walltime.
+Full Closed Loop:
+  - 3 fine-tuned PaiNN models (mine/model_2_ep500)
+  - MD at 300 K (ASE Langevin, dt=0.5 fs)
+  - Uncertainty metric: U = max_i sigma_i (force standard deviation)
+  - Threshold: U_thresh = 25.0 meV/A with dynamic relaxation
+  - On trigger (U > U_thresh):
+      1. Halts MD & archives structure in dft_calculations/
+      2. Executes local 32-core FHI-aims single point (mpirun -np 32 aims.x)
+      3. Shifts raw DFT energy with atomic baseline E0
+      4. Appends to al_dataset.xyz
+      5. Retrains 3 PaiNN committee members for 1 epoch
+      6. Reloads weights and resumes MD
+  - Dumps: unified LAMMPS dump every 1,000 steps; virial stress dump every 5,000 steps
+  - State tracking: al_checkpoint.json
+================================================================================
 """
 
 import os
 import sys
 import json
+import time
+import shutil
 import signal
 from pathlib import Path
+from typing import Dict, List, Optional
+
 import numpy as np
 import torch
-from ase import units
+from ase import Atoms, units
 from ase.io import read, write
 from ase.md.langevin import Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 
-from painn_ensemble_calc import PainnEnsembleCalculator
+from painn_ensemble_calc import PainnEnsembleCalculator, KCAL_TO_EV
 from lammps_dumps import write_lammps_dump, identify_molecules
 from dft_interface import run_aims_single_point, AimsCalculationError
 from retrain_engine import retrain_ensemble, run_final_convergence
@@ -38,9 +50,9 @@ from retrain_engine import retrain_ensemble, run_final_convergence
 class AimsPaxThresholdManager:
     """
     Rolling-window adaptive threshold engine following aims-PAX uncertainty protocol.
-    Dynamically tightens the threshold as model uncertainty improves.
+    Dynamically adjusts the threshold as model uncertainty evolves.
     """
-    def __init__(self, initial_threshold=float("inf"), c_x=0.0, max_history=400, freeze_dataset_size=150, min_history=10):
+    def __init__(self, initial_threshold=float("inf"), c_x=0.0, max_history=400, freeze_dataset_size=540, min_history=10):
         self.initial_threshold = initial_threshold
         self.threshold = initial_threshold
         self.c_x = c_x
@@ -65,356 +77,457 @@ class AimsPaxThresholdManager:
 
         return self.threshold
 
-# ==============================================================================
-# CONFIGURATION & PATHS
-# ==============================================================================
-BASE_DIR = Path("/home/maria.crist/dft_mlip/sep_pax")
+# Paths
+BASE_DIR = Path("/home/maria.crist/dft_mlip/sep_pax/al_5A_painn")
 GEOMETRIES_DIR = BASE_DIR / "geometries"
-TRAJECTORIES_DIR = BASE_DIR / "trajectories"
-DFT_CALCS_DIR = BASE_DIR / "dft_calculations"
-CHECKPOINTS_DIR = BASE_DIR / "checkpoints"
-DATASET_PATH = BASE_DIR / "al_dataset.xyz"
-CHECKPOINT_FILE = BASE_DIR / "al_checkpoint.json"
-
 CONTROL_IN = BASE_DIR / "control.in"
 SPECIES_DIR = Path("/home/maria.crist/fhi-aims.260331/species_defaults/defaults_2020/light")
 AIMS_BIN = "/home/maria.crist/fhi-aims.260331/bin/aims.x"
 
-# The 6 fine-tuned PaiNN models
+# Models: 3 fine-tuned PaiNN models (mine dataset, epoch 500)
 INITIAL_MODEL_DIRS = [
     Path("/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep500/silica_Painn_model_finetuned/painn_ensemble/model_0"),
     Path("/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep500/silica_Painn_model_finetuned/painn_ensemble/model_1"),
     Path("/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep500/silica_Painn_model_finetuned/painn_ensemble/model_2"),
-    Path("/home/maria.crist/dft_mlip/my_dataset/merged/model_2_ep500/silica_Painn_model_finetuned/painn_ensemble/model_0"),
-    Path("/home/maria.crist/dft_mlip/my_dataset/merged/model_2_ep500/silica_Painn_model_finetuned/painn_ensemble/model_1"),
-    Path("/home/maria.crist/dft_mlip/my_dataset/merged/model_2_ep500/silica_Painn_model_finetuned/painn_ensemble/model_2"),
 ]
+INITIAL_TRAIN_DATASET = Path("/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep500/train.xyz")
+INITIAL_VAL_DATASET = Path("/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep500/val.xyz")
 
-# Elemental reference energies (E0) in eV
+# Elemental Reference Energies (E0 in eV)
 REF_ENERGIES = {
-    1: 1295.1619808355229,   # H
-    8: -4671.611073387086,   # O
-    14: -2659.5960319024257  # Si
+    1: 1295.1619808355229,
+    8: -4671.611073387086,
+    14: -2659.5960319024257,
 }
 
-# Active Learning & MD Hyperparameters
+# Simulation parameters
 TEMPERATURE_K = 300.0
-MD_TIMESTEP_FS = 0.5
-LANGEVIN_FRICTION = 0.002  # 1/fs
-SKIP_STEP_MLFF = 25        # evaluate uncertainty every 25 steps
-MAX_MD_STEPS = 10000       # max steps per trajectory
-MAX_DFT_POINTS = 100       # maximum new DFT single points
-INITIAL_THRESHOLD = float("inf")
-MIN_THRESHOLD = 20.0       # meV/Angstrom
-THRESHOLD_RELAX_FACTOR = 1.02  # 2% dynamic relaxation per added point
-FINE_TUNE_EPOCHS = 1       # 1 epoch default retraining
-DUMP_INTERVAL_UNIFIED = 1000   # steps
-DUMP_INTERVAL_STRESS = 5000    # steps
-N_MPI_CORES = 32
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-
-# 9 Geometries to explore
-GEOMETRY_NAMES = [
-    "geometry_10A_alpha.in",
-    "geometry_10A_amor.in",
-    "geometry_10A_beta.in",
-    "geometry_20A_alpha.in",
-    "geometry_20A_amor.in",
-    "geometry_20A_beta.in",
-    "geometry_alpha_5.in",
-    "geometry_amor_5.in",
-    "geometry_beta_5.in",
-]
+TIMESTEP_FS = 0.5
+LANGEVIN_FRICTION = 0.002 / units.fs
+MAX_MD_STEPS = 10000
+SKIP_STEP_MLFF = 25
+DUMP_EVERY_D1 = 1000
+DUMP_EVERY_D2 = 5000
+INITIAL_U_THRESH = float("inf")
+VALID_RATIO = 0.1
+MAX_AL_CYCLES = 50
+DESIRED_ACC_FORCE_MAE = None  # Match aimsprobe.yaml (desired_acc=0.0): run full 10k steps unless max_train_set_size is reached
 
 
-class ALPipeline:
+class PainnActiveLearningManager5A:
     def __init__(self):
-        self.device = DEVICE
-        print(f"[INIT] Active Learning Pipeline on device: {self.device}")
-        TRAJECTORIES_DIR.mkdir(parents=True, exist_ok=True)
-        DFT_CALCS_DIR.mkdir(parents=True, exist_ok=True)
-        CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+        self.base_dir = BASE_DIR
+        self.dft_dir = self.base_dir / "dft_calculations"
+        self.ckpt_dir = self.base_dir / "checkpoints"
+        self.traj_dir = self.base_dir / "trajectories"
+        self.dataset_file = self.base_dir / "al_dataset.xyz"
+        self.val_dataset_file = self.base_dir / "val.xyz"
+        self.state_file = self.base_dir / "al_checkpoint.json"
 
+        self.failed_dir = self.base_dir / "failed_calculations"
+        for d in [self.dft_dir, self.ckpt_dir, self.traj_dir, self.failed_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.threshold_mgr = AimsPaxThresholdManager(
-            initial_threshold=INITIAL_THRESHOLD,
+            initial_threshold=INITIAL_U_THRESH,
             c_x=0.0,
-            freeze_dataset_size=150,
+            freeze_dataset_size=540,
         )
-        self.threshold = INITIAL_THRESHOLD
-        self.total_dft_evals = 0
-        self.cycle_count = 0
-        self.current_steps = {i: 0 for i in range(len(GEOMETRY_NAMES))}
+        self.u_thresh = INITIAL_U_THRESH
+        self.cycle = 0
+        self.step = 0
+        self.train_points_added = 0
+        self.val_points_added = 0
+        self.active_traj_idx = 0
+        self.accuracy_reached = False
         self.last_checkpoints = {}
 
-        # Initialize dataset if missing
-        if not DATASET_PATH.exists():
-            seed_source = Path("/home/maria.crist/pax/train.xyz")
-            if seed_source.exists():
-                print(f"[INIT] Seeding active learning dataset from {seed_source}")
-                initial_frames = read(str(seed_source), index=":")
-                for fr in initial_frames:
-                    if "REF_energy" not in fr.info:
-                        fr.info["REF_energy"] = fr.get_potential_energy()
-                    if "REF_forces" not in fr.arrays:
-                        fr.arrays["REF_forces"] = fr.get_forces()
-                write(str(DATASET_PATH), initial_frames, format="extxyz")
-            else:
-                DATASET_PATH.touch()
+        self.setup_signal_handlers()
+        self.initialize_dataset()
+        self.setup_models()
+        self.load_geometries()
+        self.load_checkpoint()
 
-        # Load PaiNN committee calculator
-        model_dirs = self._get_latest_model_dirs()
-        self.calculator = PainnEnsembleCalculator(
-            model_dirs=model_dirs,
+    def setup_signal_handlers(self):
+        def handle_termination(signum, frame):
+            print(f"\n[AL-Manager] Caught signal {signum}. Saving state before exit...")
+            self.save_checkpoint()
+            sys.exit(0)
+        signal.signal(signal.SIGTERM, handle_termination)
+        signal.signal(signal.SIGINT, handle_termination)
+
+    def initialize_dataset(self):
+        if not self.dataset_file.exists():
+            print(f"[AL-Manager] Initializing al_dataset.xyz from {INITIAL_TRAIN_DATASET}...")
+            shutil.copyfile(INITIAL_TRAIN_DATASET, self.dataset_file)
+        if not self.val_dataset_file.exists() and INITIAL_VAL_DATASET.exists():
+            print(f"[AL-Manager] Initializing val.xyz from {INITIAL_VAL_DATASET}...")
+            shutil.copyfile(INITIAL_VAL_DATASET, self.val_dataset_file)
+        frames = read(str(self.dataset_file), index=":")
+        print(f"[AL-Manager] Active learning dataset contains {len(frames)} frames.")
+
+    def setup_models(self):
+        self.current_model_dirs = []
+        cycle_0_dir = self.ckpt_dir / "cycle_00"
+        for i, m_dir in enumerate(INITIAL_MODEL_DIRS):
+            target_dir = cycle_0_dir / f"model_{i}"
+            if not target_dir.exists():
+                shutil.copytree(m_dir, target_dir)
+            self.current_model_dirs.append(target_dir)
+
+        print(f"[AL-Manager] Loading 3 PaiNN models to {self.device}...")
+        self.calc = PainnEnsembleCalculator(
+            model_dirs=self.current_model_dirs,
             ref_energies=REF_ENERGIES,
             cutoff=6.0,
             device=self.device,
         )
-
-        # Persistent Adam optimizers across AL cycles
+        # Persistent Adam optimizers
         self.optimizers = {
             i: torch.optim.Adam(filter(lambda p: p.requires_grad, m.parameters()), lr=1e-4)
-            for i, m in enumerate(self.calculator.models)
+            for i, m in enumerate(self.calc.models)
         }
 
-        # Setup 9 trajectories
+    def load_geometries(self):
+        self.geometry_files = sorted(list(GEOMETRIES_DIR.glob("*.in")))
+        print(f"[AL-Manager] Loaded {len(self.geometry_files)} 5 Angstrom gap geometries:")
         self.trajectories = []
-        self.md_drivers = []
-        self.mol_ids = []
+        for i, g_file in enumerate(self.geometry_files):
+            atoms = read(str(g_file), format="aims")
+            atoms.calc = self.calc
+            print(f"  [{i}] {g_file.name} ({len(atoms)} atoms)")
+            self.trajectories.append({
+                "name": g_file.stem,
+                "atoms": atoms,
+                "step": 0,
+                "d1_path": self.traj_dir / f"traj_{g_file.stem}.lammpstrj",
+                "d2_path": self.traj_dir / f"traj_stress_{g_file.stem}.lammpstrj",
+            })
 
-        self._setup_trajectories()
+    def save_checkpoint(self):
+        traj_states = []
+        for t in self.trajectories:
+            traj_states.append({
+                "step": t["step"],
+                "positions": t["atoms"].get_positions().tolist(),
+                "velocities": t["atoms"].get_velocities().tolist(),
+            })
 
-        # Check for resume checkpoint
-        if CHECKPOINT_FILE.exists():
-            self._load_checkpoint()
-
-        # Register graceful exit handlers
-        signal.signal(signal.SIGINT, self._handle_exit_signal)
-        signal.signal(signal.SIGTERM, self._handle_exit_signal)
-
-    def _get_latest_model_dirs(self):
-        """Finds latest cycle checkpoints or defaults to INITIAL_MODEL_DIRS."""
-        cycle_dirs = sorted(CHECKPOINTS_DIR.glob("cycle_*"))
-        if cycle_dirs:
-            latest = cycle_dirs[-1]
-            subdirs = sorted([d for d in latest.iterdir() if d.is_dir() and "model_" in d.name])
-            if len(subdirs) == len(INITIAL_MODEL_DIRS):
-                print(f"[INIT] Resuming PaiNN models from checkpoint: {latest}")
-                return [str(d) for d in subdirs]
-        return [str(d) for d in INITIAL_MODEL_DIRS]
-
-    def _setup_trajectories(self):
-        """Initializes Atoms objects and ASE Langevin dynamics for all 9 geometries."""
-        print(f"[INIT] Loading {len(GEOMETRY_NAMES)} initial geometries at {TEMPERATURE_K}K...")
-        for idx, g_name in enumerate(GEOMETRY_NAMES):
-            g_path = GEOMETRIES_DIR / g_name
-            if not g_path.exists():
-                raise FileNotFoundError(f"Geometry file not found: {g_path}")
-
-            atoms = read(str(g_path), format="aims")
-            atoms.calc = self.calculator
-
-            # Initialize thermal velocities
-            MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K)
-            Stationary(atoms)
-
-            # ASE Langevin dynamics driver
-            dyn = Langevin(
-                atoms,
-                timestep=MD_TIMESTEP_FS * units.fs,
-                temperature_K=TEMPERATURE_K,
-                friction=LANGEVIN_FRICTION / units.fs,
-            )
-
-            mols = identify_molecules(atoms)
-            self.trajectories.append(atoms)
-            self.md_drivers.append(dyn)
-            self.mol_ids.append(mols)
-
-    def _save_checkpoint(self):
-        """Saves pipeline state to JSON for instant resumption."""
         state = {
-            "cycle_count": self.cycle_count,
-            "total_dft_evals": self.total_dft_evals,
-            "threshold": self.threshold,
-            "current_steps": self.current_steps,
-            "positions": [atoms.get_positions().tolist() for atoms in self.trajectories],
-            "velocities": [atoms.get_velocities().tolist() for atoms in self.trajectories],
+            "cycle": self.cycle,
+            "step": self.step,
+            "train_points_added": self.train_points_added,
+            "val_points_added": self.val_points_added,
+            "active_traj_idx": self.active_traj_idx,
+            "u_thresh": self.u_thresh,
+            "uncertainty_history": self.threshold_mgr.uncertainty_history,
+            "threshold_frozen": self.threshold_mgr.frozen,
+            "current_model_dirs": [str(d) for d in self.current_model_dirs],
+            "trajectories": traj_states,
         }
-        with open(CHECKPOINT_FILE, "w") as f:
+        with open(self.state_file, "w") as f:
             json.dump(state, f, indent=2)
-        print(f"[CHECKPOINT] Saved state to {CHECKPOINT_FILE}")
+        print(f"[AL-Manager] State saved to {self.state_file.name} (Cycle: {self.cycle}, Step: {self.step})")
 
-    def _load_checkpoint(self):
-        """Restores pipeline state from JSON."""
-        print(f"[RESUME] Found existing checkpoint: {CHECKPOINT_FILE}. Loading state...")
-        with open(CHECKPOINT_FILE) as f:
+    def load_checkpoint(self):
+        if not self.state_file.exists():
+            print("[AL-Manager] No previous checkpoint found. Starting fresh run at 300 K.")
+            for t in self.trajectories:
+                MaxwellBoltzmannDistribution(t["atoms"], temperature_K=TEMPERATURE_K, rng=np.random.RandomState(42))
+                Stationary(t["atoms"])
+            return
+
+        print(f"[AL-Manager] Resuming from checkpoint {self.state_file}...")
+        with open(self.state_file, "r") as f:
             state = json.load(f)
 
-        self.cycle_count = state.get("cycle_count", 0)
-        self.total_dft_evals = state.get("total_dft_evals", 0)
-        self.threshold = state.get("threshold", INITIAL_THRESHOLD)
-        self.current_steps = {int(k): v for k, v in state.get("current_steps", {}).items()}
+        self.cycle = state.get("cycle", 0)
+        self.step = state.get("step", 0)
+        self.train_points_added = state.get("train_points_added", 0)
+        self.val_points_added = state.get("val_points_added", 0)
+        self.active_traj_idx = state.get("active_traj_idx", 0)
+        self.u_thresh = state.get("u_thresh", INITIAL_U_THRESH)
+        self.threshold_mgr.threshold = self.u_thresh
+        self.threshold_mgr.uncertainty_history = state.get("uncertainty_history", [])
+        self.threshold_mgr.frozen = state.get("threshold_frozen", False)
 
-        pos_list = state.get("positions", [])
-        vel_list = state.get("velocities", [])
-        for i in range(len(self.trajectories)):
-            if i < len(pos_list):
-                self.trajectories[i].set_positions(np.array(pos_list[i]))
-            if i < len(vel_list):
-                self.trajectories[i].set_velocities(np.array(vel_list[i]))
-        print(f"[RESUME SUCCESS] Resumed at Cycle {self.cycle_count} | Total DFT evals: {self.total_dft_evals} | Threshold: {self.threshold:.2f} meV/A")
+        saved_dirs = [Path(d) for d in state.get("current_model_dirs", [])]
+        if saved_dirs and all(d.exists() for d in saved_dirs):
+            self.current_model_dirs = saved_dirs
+            self.calc = PainnEnsembleCalculator(
+                model_dirs=self.current_model_dirs,
+                ref_energies=REF_ENERGIES,
+                cutoff=6.0,
+                device=self.device,
+            )
+            self.optimizers = {
+                i: torch.optim.Adam(filter(lambda p: p.requires_grad, m.parameters()), lr=1e-4)
+                for i, m in enumerate(self.calc.models)
+            }
 
-    def _handle_exit_signal(self, signum, frame):
-        print(f"\n[INTERRUPT] Received signal {signum}. Saving state before exiting...")
-        self._save_checkpoint()
-        sys.exit(0)
+        for i, t_state in enumerate(state.get("trajectories", [])):
+            if i < len(self.trajectories):
+                self.trajectories[i]["step"] = t_state["step"]
+                self.trajectories[i]["atoms"].set_positions(np.array(t_state["positions"]))
+                self.trajectories[i]["atoms"].set_velocities(np.array(t_state["velocities"]))
+                self.trajectories[i]["atoms"].calc = self.calc
+
+    def handle_uncertainty_trigger(self, traj_idx: int, atoms: Atoms, u_value: float, atom_std: np.ndarray = None):
+        self.cycle += 1
+        trigger_info = ""
+        if atom_std is not None:
+            max_idx = int(np.argmax(atom_std))
+            elem = atoms.get_chemical_symbols()[max_idx]
+            z_pos = atoms.get_positions()[max_idx, 2]
+            trigger_info = f" | Trigger Atom: #{max_idx} ({elem}) at z={z_pos:.2f} Å"
+
+        print("\n" + "=" * 80)
+        print(f">>> [TRIGGER] Cycle {self.cycle} | Trajectory {traj_idx} ({self.trajectories[traj_idx]['name']})")
+        print(f">>> Uncertainty: {u_value:.4f} eV/A > Threshold: {self.u_thresh:.4f} eV/A{trigger_info}")
+        print("=" * 80)
+
+        # 1. Run FHI-aims single point (32 cores) with failure capture
+        try:
+            e_dft, f_dft, calc_dir = run_aims_single_point(
+                atoms=atoms,
+                dft_root_dir=self.dft_dir,
+                step=self.step,
+                traj_idx=traj_idx,
+                control_in_path=CONTROL_IN,
+                species_dir=SPECIES_DIR,
+                aims_bin=AIMS_BIN,
+                n_cores=32,
+            )
+        except AimsCalculationError as err:
+            self.cycle -= 1
+            print("\n" + "!" * 80)
+            print(f">>> [CALCULATION FAILED] FHI-aims failed on Trajectory {traj_idx} ({self.trajectories[traj_idx]['name']}) at step {self.step}!")
+            print(f">>> Preserving failed calculation in '{self.failed_dir.name}/' for investigation.")
+            print("!" * 80 + "\n")
+
+            failed_target = self.failed_dir / f"step_{self.step:06d}_traj_{traj_idx}_{self.trajectories[traj_idx]['name']}"
+            if err.calc_dir.exists():
+                if failed_target.exists():
+                    shutil.rmtree(failed_target)
+                shutil.move(str(err.calc_dir), str(failed_target))
+
+            log_entry = (
+                f"\n{'=' * 80}\n"
+                f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Trajectory: {traj_idx} ({self.trajectories[traj_idx]['name']}) | MD Step: {self.step}\n"
+                f"Uncertainty: {u_value:.4f} eV/A | Threshold: {self.u_thresh:.4f} eV/A\n"
+                f"Preserved Folder: {failed_target}\n"
+                f"Error Message: {err}\n"
+                f"--- aims.out Error Snippet ---\n"
+                f"{err.log_snippet}\n"
+                f"{'=' * 80}\n"
+            )
+            with open(self.failed_dir / "failed_calculations.log", "a") as f:
+                f.write(log_entry)
+
+            # Rollback trajectory to last safe checkpoint
+            if traj_idx in self.last_checkpoints:
+                safe_pos, safe_vel = self.last_checkpoints[traj_idx]
+                atoms.set_positions(safe_pos)
+                atoms.set_velocities(safe_vel)
+                print(f"[AL-Manager] Rolled back {self.trajectories[traj_idx]['name']} to last safe checkpoint.")
+            return
+
+        # 2. Append labeled frame to dataset (with 10% validation quota per aims-PAX)
+        labeled_atoms = atoms.copy()
+        labeled_atoms.info["REF_energy"] = e_dft
+        labeled_atoms.arrays["REF_forces"] = f_dft
+        if atom_std is not None:
+            labeled_atoms.arrays["force_std"] = atom_std
+            max_idx = int(np.argmax(atom_std))
+            labeled_atoms.info["trigger_atom_idx"] = max_idx
+            labeled_atoms.info["trigger_element"] = atoms.get_chemical_symbols()[max_idx]
+            labeled_atoms.info["trigger_z"] = float(atoms.get_positions()[max_idx, 2])
+
+        total_points_added = self.train_points_added + self.val_points_added + 1
+        if self.val_points_added < VALID_RATIO * total_points_added:
+            write(str(self.val_dataset_file), labeled_atoms, format="extxyz", append=True)
+            self.val_points_added += 1
+            print(f"[AL-Manager] Added point to validation set (Total Val: {self.val_points_added}). Skipping retrain per aims-PAX quota.")
+            self.last_checkpoints[traj_idx] = (atoms.get_positions().copy(), atoms.get_velocities().copy())
+            self.save_checkpoint()
+            return
+
+        write(str(self.dataset_file), labeled_atoms, format="extxyz", append=True)
+        self.train_points_added += 1
+
+        # Update last known safe checkpoint
+        self.last_checkpoints[traj_idx] = (atoms.get_positions().copy(), atoms.get_velocities().copy())
+
+        # 3. Retrain 3 PaiNN models (1 epoch) with persistent optimizers
+        print(f"[AL-Manager] Retraining 3 PaiNN models for 1 epoch (Cycle {self.cycle})...")
+        updated_paths = retrain_ensemble(
+            calculator=self.calc,
+            dataset_path=self.dataset_file,
+            ref_energies=REF_ENERGIES,
+            checkpoint_dir=self.ckpt_dir,
+            cycle=self.cycle,
+            n_epochs=1,
+            batch_size=4,
+            lr=1e-4,
+            device=self.device,
+            val_dataset_path=self.val_dataset_file,
+            optimizers=self.optimizers,
+        )
+        self.current_model_dirs = [Path(p) for p in updated_paths]
+
+        # 4. Ensure updated calculator is bound to all trajectories
+        for t in self.trajectories:
+            t["atoms"].calc = self.calc
+
+        # 5. Evaluate validation set & check desired_acc stopping criterion
+        val_f_mae, val_e_mae = self.evaluate_validation()
+        if val_f_mae is not None:
+            print(f"[AL-Manager] Cycle {self.cycle} Validation -> Force MAE: {val_f_mae:.2f} meV/A | Energy MAE: {val_e_mae:.2f} meV/atom")
+            if DESIRED_ACC_FORCE_MAE is not None and val_f_mae <= DESIRED_ACC_FORCE_MAE:
+                print("\n" + "*" * 80)
+                print(f">>> [TARGET REACHED] Validation Force MAE ({val_f_mae:.2f} meV/A) <= desired_acc ({DESIRED_ACC_FORCE_MAE:.2f} meV/A)!")
+                print(f">>> Active Learning converged successfully on accuracy criterion.")
+                print("*" * 80 + "\n")
+                self.accuracy_reached = True
+
+        self.save_checkpoint()
+
+    def evaluate_validation(self):
+        """
+        Evaluates the committee on the held-out validation set to compute Force MAE (meV/A)
+        and Energy MAE (meV/atom).
+        """
+        val_path = self.val_dataset_file if self.val_dataset_file.exists() else INITIAL_VAL_DATASET
+        if not val_path.exists():
+            return None, None
+
+        val_frames = read(str(val_path), index=":")
+        f_maes = []
+        e_maes = []
+        for atoms in val_frames:
+            if "REF_forces" in atoms.arrays:
+                f_ref = atoms.arrays["REF_forces"]
+            elif "forces" in atoms.arrays:
+                f_ref = atoms.arrays["forces"]
+            else:
+                continue
+
+            if "REF_energy" in atoms.info:
+                e_ref = atoms.info["REF_energy"]
+            elif "energy" in atoms.info:
+                e_ref = atoms.info["energy"]
+            else:
+                e_ref = None
+
+            atoms.calc = self.calc
+            self.calc.calculate(atoms)
+            f_pred = self.calc.results["forces"]
+            f_mae = np.mean(np.abs(f_pred - f_ref)) * 1000.0  # meV/A
+            f_maes.append(f_mae)
+
+            if e_ref is not None:
+                e_pred = self.calc.results["energy"]
+                e_mae = abs(e_pred - e_ref) / len(atoms) * 1000.0  # meV/atom
+                e_maes.append(e_mae)
+
+        mean_f_mae = float(np.mean(f_maes)) if f_maes else None
+        mean_e_mae = float(np.mean(e_maes)) if e_maes else None
+        return mean_f_mae, mean_e_mae
 
     def run(self):
-        print("\n" + "=" * 70)
-        print("STARTING PAINN COMMITTEE ACTIVE LEARNING SIMULATION")
-        print(f"Trajectories: {len(self.trajectories)} | Temp: {TEMPERATURE_K}K | Step: {MD_TIMESTEP_FS} fs")
-        print(f"Initial Threshold: {self.threshold:.2f} meV/A | Max DFT Budget: {MAX_DFT_POINTS}")
-        print("=" * 70 + "\n")
+        print("\n==========================================================")
+        print(f"STARTING PAINN ACTIVE LEARNING RUN ON 5 A GEOMETRIES")
+        print(f"Max steps: {MAX_MD_STEPS} | T: {TEMPERATURE_K} K | Device: {self.device}")
+        if DESIRED_ACC_FORCE_MAE is not None:
+            print(f"Desired accuracy limit: {DESIRED_ACC_FORCE_MAE:.2f} meV/A Force MAE")
+        print("==========================================================\n")
 
-        all_done = False
-        while not all_done and self.total_dft_evals < MAX_DFT_POINTS:
-            all_done = True
+        dyn_drivers = []
+        for i, t in enumerate(self.trajectories):
+            dyn = Langevin(
+                t["atoms"],
+                timestep=TIMESTEP_FS * units.fs,
+                temperature_K=TEMPERATURE_K,
+                friction=LANGEVIN_FRICTION,
+                rng=np.random.RandomState(100 + i),
+            )
+            dyn_drivers.append(dyn)
 
-            for traj_idx in range(len(self.trajectories)):
-                atoms = self.trajectories[traj_idx]
-                dyn = self.md_drivers[traj_idx]
-                mol_id = self.mol_ids[traj_idx]
-                step = self.current_steps[traj_idx]
-
-                if step >= MAX_MD_STEPS:
+        while any(t["step"] < MAX_MD_STEPS for t in self.trajectories) and self.cycle < MAX_AL_CYCLES and not self.accuracy_reached:
+            for i, t in enumerate(self.trajectories):
+                if t["step"] >= MAX_MD_STEPS:
                     continue
-                all_done = False
 
-                # Save safe coordinates before propagation
+                self.active_traj_idx = i
+                dyn = dyn_drivers[i]
+                atoms = t["atoms"]
+
+                # Save safe state before stepping
                 safe_pos = atoms.get_positions().copy()
                 safe_vel = atoms.get_velocities().copy()
+                self.last_checkpoints[i] = (safe_pos, safe_vel)
 
-                # 1. Propagate MD for SKIP_STEP_MLFF steps
                 dyn.run(SKIP_STEP_MLFF)
-                step += SKIP_STEP_MLFF
-                self.current_steps[traj_idx] = step
+                t["step"] += SKIP_STEP_MLFF
+                self.step = max(tr["step"] for tr in self.trajectories)
 
-                # Trajectory dumps with dynamic molecule identification
-                if step % DUMP_INTERVAL_UNIFIED == 0:
-                    dump_file = TRAJECTORIES_DIR / f"traj_traj{traj_idx}.lammpstrj"
-                    mol_ids = identify_molecules(atoms)
-                    write_lammps_dump(
-                        filename=dump_file,
-                        step=step,
-                        atoms=atoms,
-                        mol_ids=mol_ids,
-                        stress=None,
-                        append=True,
-                    )
-
-                if step % DUMP_INTERVAL_STRESS == 0:
-                    calc_res = atoms.calc.results
-                    stress_diag = calc_res.get("atomic_stress", np.zeros((len(atoms), 3)))
-                    stress_file = TRAJECTORIES_DIR / f"traj_stress_traj{traj_idx}.lammpstrj"
-                    mol_ids = identify_molecules(atoms)
-                    write_lammps_dump(
-                        filename=stress_file,
-                        step=step,
-                        atoms=atoms,
-                        mol_ids=mol_ids,
-                        stress=stress_diag,
-                        append=True,
-                    )
-
-                # 2. Evaluate Uncertainty at Current Step
-                calc_res = atoms.calc.results
-                uncertainty = float(calc_res.get("max_atomic_sd", 0.0))
-                mean_energy = float(calc_res.get("energy", 0.0))
+                res = atoms.calc.results
+                u = float(res.get("max_atomic_sd", 0.0))
 
                 # Update rolling adaptive threshold
-                current_ds_size = len(read(str(DATASET_PATH), index=":"))
-                self.threshold = self.threshold_mgr.update(uncertainty, current_ds_size)
+                ds_size = len(read(str(self.dataset_file), index=":"))
+                self.u_thresh = self.threshold_mgr.update(u, ds_size)
 
-                print(
-                    f"[{GEOMETRY_NAMES[traj_idx]} | Step {step:05d}] "
-                    f"Energy: {mean_energy:.2f} eV | U: {uncertainty:.2f} meV/A "
-                    f"(Thresh: {self.threshold:.2f})"
-                )
+                # Dumps with dynamic molecule identification
+                if t["step"] % DUMP_EVERY_D1 == 0:
+                    mol_ids = identify_molecules(atoms)
+                    write_lammps_dump(t["d1_path"], step=t["step"], atoms=atoms, mol_ids=mol_ids, stress=None, append=True)
+                if t["step"] % DUMP_EVERY_D2 == 0:
+                    mol_ids = identify_molecules(atoms)
+                    stress = res.get("atomic_stress", None)
+                    write_lammps_dump(t["d2_path"], step=t["step"], atoms=atoms, mol_ids=mol_ids, stress=stress, append=True)
 
-                # 3. Check Uncertainty Trigger
-                if uncertainty > self.threshold:
-                    print(
-                        f"\n>>> [ACTIVE LEARNING TRIGGER] Trajectory {traj_idx} ({GEOMETRY_NAMES[traj_idx]}) "
-                        f"crossed uncertainty threshold: {uncertainty:.2f} > {self.threshold:.2f} meV/A!"
-                    )
+                if t["step"] % 100 == 0:
+                    temp = atoms.get_temperature()
+                    thresh_str = f"{self.u_thresh:.4f} eV/A" if np.isfinite(self.u_thresh) else "inf"
+                    print(f"Step {t['step']:05d} | {t['name']} | T: {temp:.1f} K | U: {u:.4f} eV/A | Thresh: {thresh_str}")
 
-                    # A. Execute Local FHI-aims DFT (32 cores) with failure capture & rollback
-                    try:
-                        e_dft, f_dft, calc_dir = run_aims_single_point(
-                            atoms=atoms,
-                            dft_root_dir=DFT_CALCS_DIR,
-                            step=step,
-                            traj_idx=traj_idx,
-                            control_in_path=CONTROL_IN,
-                            species_dir=SPECIES_DIR,
-                            aims_bin=AIMS_BIN,
-                            n_cores=N_MPI_CORES,
-                        )
-                    except AimsCalculationError as err:
-                        print(f"\n[DFT FAILED] Calculation failed at step {step} for traj {traj_idx}: {err}")
-                        print("Rolling back trajectory to last safe checkpoint...")
-                        atoms.set_positions(safe_pos)
-                        atoms.set_velocities(safe_vel)
-                        continue
-
-                    self.total_dft_evals += 1
-                    self.cycle_count += 1
-
-                    # B. Append labeled frame to active learning dataset
-                    labeled_atoms = atoms.copy()
-                    labeled_atoms.info["REF_energy"] = e_dft
-                    labeled_atoms.arrays["REF_forces"] = f_dft
-                    write(str(DATASET_PATH), labeled_atoms, format="extxyz", append=True)
-
-                    # C. Retrain the 6 PaiNN committee members with persistent optimizers
-                    retrain_ensemble(
-                        calculator=self.calculator,
-                        dataset_path=DATASET_PATH,
-                        ref_energies=REF_ENERGIES,
-                        checkpoint_dir=CHECKPOINTS_DIR,
-                        cycle=self.cycle_count,
-                        n_epochs=FINE_TUNE_EPOCHS,
-                        batch_size=4,
-                        lr=1e-4,
-                        device=self.device,
-                        optimizers=self.optimizers,
-                    )
-
-                    # D. Update safe checkpoint
-                    self.last_checkpoints[traj_idx] = (atoms.get_positions().copy(), atoms.get_velocities().copy())
-
-                    # E. Save pipeline state
-                    self._save_checkpoint()
-
-                    if self.total_dft_evals >= MAX_DFT_POINTS:
-                        print(f"\n[FINISHED] Reached maximum DFT budget ({MAX_DFT_POINTS}). Active learning loop complete.")
+                # Trigger condition
+                if u > self.u_thresh:
+                    atom_std = res.get("std_per_atom", None)
+                    self.handle_uncertainty_trigger(traj_idx=i, atoms=atoms, u_value=u, atom_std=atom_std)
+                    if self.accuracy_reached:
                         break
 
-            if self.total_dft_evals >= MAX_DFT_POINTS:
+            if self.accuracy_reached:
                 break
 
-        print("\n[MD EXPLORATION COMPLETE] Running post-active learning convergence...")
-        run_final_convergence(
-            calculator=self.calculator,
-            dataset_path=DATASET_PATH,
-            ref_energies=REF_ENERGIES,
-            output_dir=CHECKPOINTS_DIR / "converged_models",
-            n_epochs=50,
-            device=self.device,
-        )
-        self._save_checkpoint()
+            if self.step % 500 == 0:
+                self.save_checkpoint()
+
+        print("\n==========================================================")
+        if self.accuracy_reached:
+            print("Active Learning HALTED: Desired accuracy target achieved!")
+        else:
+            print(f"PaiNN Active Learning Completed Successfully!")
+        print(f"Total Cycles: {self.cycle} | Final Steps: {self.step}")
+        print("==========================================================")
+
+        # Post-AL convergence routine
+        if not self.accuracy_reached:
+            run_final_convergence(
+                calculator=self.calc,
+                dataset_path=self.dataset_file,
+                val_dataset_path=self.val_dataset_file,
+                ref_energies=REF_ENERGIES,
+                output_dir=self.ckpt_dir / "converged_models",
+                n_epochs=50,
+                device=self.device,
+            )
 
 
 if __name__ == "__main__":
-    pipeline = ALPipeline()
-    pipeline.run()
+    manager = PainnActiveLearningManager5A()
+    manager.run()

@@ -273,11 +273,18 @@ class PainnActiveLearningManager5A:
                 self.trajectories[i]["atoms"].set_velocities(np.array(t_state["velocities"]))
                 self.trajectories[i]["atoms"].calc = self.calc
 
-    def handle_uncertainty_trigger(self, traj_idx: int, atoms: Atoms, u_value: float):
+    def handle_uncertainty_trigger(self, traj_idx: int, atoms: Atoms, u_value: float, atom_std: np.ndarray = None):
         self.cycle += 1
+        trigger_info = ""
+        if atom_std is not None:
+            max_idx = int(np.argmax(atom_std))
+            elem = atoms.get_chemical_symbols()[max_idx]
+            z_pos = atoms.get_positions()[max_idx, 2]
+            trigger_info = f" | Trigger Atom: #{max_idx} ({elem}) at z={z_pos:.2f} Å"
+
         print("\n" + "=" * 80)
         print(f">>> [TRIGGER] Cycle {self.cycle} | Trajectory {traj_idx} ({self.trajectories[traj_idx]['name']})")
-        print(f">>> Uncertainty: {u_value:.4f} eV/A > Threshold: {self.u_thresh:.4f} eV/A")
+        print(f">>> Uncertainty: {u_value:.4f} eV/A > Threshold: {self.u_thresh:.4f} eV/A{trigger_info}")
         print("=" * 80)
 
         # 1. Run FHI-aims single point (32 cores) with failure capture
@@ -331,6 +338,12 @@ class PainnActiveLearningManager5A:
         labeled_atoms = atoms.copy()
         labeled_atoms.info["REF_energy"] = e_dft
         labeled_atoms.arrays["REF_forces"] = f_dft
+        if atom_std is not None:
+            labeled_atoms.arrays["force_std"] = atom_std
+            max_idx = int(np.argmax(atom_std))
+            labeled_atoms.info["trigger_atom_idx"] = max_idx
+            labeled_atoms.info["trigger_element"] = atoms.get_chemical_symbols()[max_idx]
+            labeled_atoms.info["trigger_z"] = float(atoms.get_positions()[max_idx, 2])
 
         total_points_added = self.train_points_added + self.val_points_added + 1
         if self.val_points_added < VALID_RATIO * total_points_added:
@@ -483,7 +496,8 @@ class PainnActiveLearningManager5A:
 
                 # Trigger condition
                 if u > self.u_thresh:
-                    self.handle_uncertainty_trigger(traj_idx=i, atoms=atoms, u_value=u)
+                    atom_std = res.get("std_per_atom", None)
+                    self.handle_uncertainty_trigger(traj_idx=i, atoms=atoms, u_value=u, atom_std=atom_std)
                     if self.accuracy_reached:
                         break
 
