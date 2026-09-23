@@ -88,10 +88,23 @@ def build_nff_dataset(atoms_list, ref_energies, cutoff=6.0):
 
         energy_grad = -np.array(forces, dtype=np.float64)
 
-        # Graph neighbor list
-        pos_tensor = torch.tensor(pos, dtype=torch.float32)
-        nbrs = get_neighbor_list(pos_tensor, cutoff=cutoff, undirected=False)
-        offs = torch.zeros(nbrs.shape[0], 3).float()
+        # Periodic-aware Graph neighbor list
+        cell = atoms.get_cell()
+        pbc = atoms.get_pbc()
+        if any(pbc):
+            from ase.neighborlist import neighbor_list
+            i, j, S = neighbor_list("ijS", atoms, cutoff=cutoff)
+            if len(i) > 0:
+                nbrs = torch.tensor(np.stack([i, j], axis=1), dtype=torch.long)
+                cart_offsets = np.dot(S, cell)
+                offs = torch.tensor(cart_offsets, dtype=torch.float32)
+            else:
+                nbrs = torch.empty((0, 2), dtype=torch.long)
+                offs = torch.empty((0, 3), dtype=torch.float32)
+        else:
+            pos_tensor = torch.tensor(pos, dtype=torch.float32)
+            nbrs = get_neighbor_list(pos_tensor, cutoff=cutoff, undirected=False)
+            offs = torch.zeros(nbrs.shape[0], 3).float()
 
         nxyz_list.append(nxyz)
         energy_list.append(float(e_ref))
@@ -123,10 +136,12 @@ def retrain_ensemble(
     batch_size=4,
     lr=1e-4,
     device="cuda:0" if torch.cuda.is_available() else "cpu",
+    val_dataset_path=None,
+    optimizers=None,
 ):
     """
-    Retrains all 6 models in the ensemble for n_epochs (default 1 epoch)
-    and saves checkpoints.
+    Retrains all models in the ensemble for n_epochs (default 1 epoch)
+    and saves checkpoints. Supports persistent optimizers and dedicated validation set.
     """
     print(f"\n[RETRAIN] Starting online fine-tuning for cycle {cycle} ({n_epochs} epoch)...")
     dataset_file = Path(dataset_path)
@@ -145,6 +160,18 @@ def retrain_ensemble(
         sampler=RandomSampler(nff_dataset),
     )
 
+    if val_dataset_path and Path(val_dataset_path).exists():
+        val_atoms = read(str(val_dataset_path), index=":", format="extxyz")
+        val_dataset = build_nff_dataset(val_atoms, ref_energies, cutoff=calculator.cutoff)
+        validation_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            collate_fn=collate_dicts,
+            shuffle=False,
+        )
+    else:
+        validation_loader = train_loader
+
     cycle_ckpt_dir = Path(checkpoint_dir) / f"cycle_{cycle:04d}"
     cycle_ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -155,8 +182,14 @@ def retrain_ensemble(
         m_dir.mkdir(parents=True, exist_ok=True)
 
         model.train()
-        trainable_params = filter(lambda p: p.requires_grad, model.parameters())
-        optimizer = Adam(trainable_params, lr=lr)
+        if optimizers is not None and idx in optimizers:
+            optimizer = optimizers[idx]
+        else:
+            trainable_params = filter(lambda p: p.requires_grad, model.parameters())
+            optimizer = Adam(trainable_params, lr=lr)
+            if optimizers is not None:
+                optimizers[idx] = optimizer
+
         loss_fn = make_safe_loss_fn(loss_coef={"energy_grad": 0.95, "energy": 0.05})
 
         train_hooks = [
@@ -169,7 +202,7 @@ def retrain_ensemble(
             loss_fn=loss_fn,
             optimizer=optimizer,
             train_loader=train_loader,
-            validation_loader=train_loader,  # lightweight placeholder
+            validation_loader=validation_loader,
             checkpoint_interval=1,
             hooks=train_hooks,
         )
@@ -185,7 +218,94 @@ def retrain_ensemble(
 
         updated_model_paths.append(str(m_dir))
 
-    # Reload all 6 updated models into the calculator
+    # Reload all updated models into the calculator
     calculator.load_models(updated_model_paths)
-    print(f"[RETRAIN COMPLETE] All 6 PaiNN models updated and reloaded.\n")
+    print(f"[RETRAIN COMPLETE] All {len(calculator.models)} PaiNN models updated and reloaded.\n")
     return updated_model_paths
+
+
+def run_final_convergence(
+    calculator,
+    dataset_path,
+    ref_energies,
+    output_dir,
+    val_dataset_path=None,
+    n_epochs=50,
+    batch_size=4,
+    lr=1e-4,
+    patience=10,
+    device="cuda:0" if torch.cuda.is_available() else "cpu",
+):
+    """
+    Dedicated post-active learning convergence training routine.
+    Trains committee members on the accumulated dataset with ReduceLROnPlateau,
+    saving the converged models to output_dir.
+    """
+    print(f"\n[CONVERGENCE] Running final convergence training for up to {n_epochs} epochs...")
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    atoms_list = read(str(dataset_path), index=":", format="extxyz")
+    nff_dataset = build_nff_dataset(atoms_list, ref_energies, cutoff=calculator.cutoff)
+    train_loader = DataLoader(
+        nff_dataset,
+        batch_size=batch_size,
+        collate_fn=collate_dicts,
+        sampler=RandomSampler(nff_dataset),
+    )
+
+    if val_dataset_path and Path(val_dataset_path).exists():
+        val_atoms = read(str(val_dataset_path), index=":", format="extxyz")
+        val_dataset = build_nff_dataset(val_atoms, ref_energies, cutoff=calculator.cutoff)
+        validation_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            collate_fn=collate_dicts,
+            shuffle=False,
+        )
+    else:
+        validation_loader = train_loader
+
+    converged_paths = []
+    for idx, model in enumerate(calculator.models):
+        m_dir = out_dir / f"converged_model_{idx}"
+        m_dir.mkdir(parents=True, exist_ok=True)
+
+        model.train()
+        trainable_params = filter(lambda p: p.requires_grad, model.parameters())
+        optimizer = Adam(trainable_params, lr=lr)
+        loss_fn = make_safe_loss_fn(loss_coef={"energy_grad": 0.95, "energy": 0.05})
+
+        train_hooks = [
+            hooks.MaxEpochHook(n_epochs),
+            hooks.ReduceLROnPlateauHook(
+                optimizer=optimizer,
+                patience=patience,
+                factor=0.5,
+                min_lr=1e-6,
+            ),
+        ]
+
+        trainer = Trainer(
+            model_path=str(m_dir),
+            model=model,
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+            train_loader=train_loader,
+            validation_loader=validation_loader,
+            checkpoint_interval=5,
+            hooks=train_hooks,
+        )
+        trainer.grad_is_nan = types.MethodType(grad_is_finite, trainer)
+
+        print(f"  --> Converging Model {idx}...")
+        trainer.train(device=torch.device(device), n_epochs=n_epochs)
+
+        best_path = m_dir / "best_model"
+        if not best_path.exists():
+            torch.save(model, str(best_path))
+        converged_paths.append(str(m_dir))
+
+    calculator.load_models(converged_paths)
+    print(f"[CONVERGENCE COMPLETE] All models converged and saved to: {out_dir}\n")
+    return converged_paths

@@ -9,7 +9,6 @@ Provides:
 
 from pathlib import Path
 import numpy as np
-from scipy.spatial.distance import cdist
 
 TYPE_MAP = {
     "H": 1,
@@ -20,13 +19,12 @@ TYPE_MAP = {
 
 def identify_molecules(atoms):
     """
-    Identifies water molecules in a silica/water system.
+    Identifies water molecules in a silica/water system using periodic minimum image convention.
     Assigns:
       - Slab atoms: mol_id = 1
       - Water molecules: mol_id = 2, 3, ... (each water molecule gets its own ID)
     """
     symbols = atoms.get_chemical_symbols()
-    pos = atoms.get_positions()
     natoms = len(atoms)
 
     mol_ids = np.ones(natoms, dtype=int)  # default slab = 1
@@ -37,16 +35,13 @@ def identify_molecules(atoms):
     if not o_indices or not h_indices:
         return mol_ids
 
-    dists = cdist(pos[o_indices], pos[h_indices])
-    closest_o = np.argmin(dists, axis=0)
-    min_dists = np.min(dists, axis=0)
-
-    # Group Hydrogens to Oxygen if within 1.3 Angstroms (covalent O-H distance)
+    # Find closest oxygen for each hydrogen using minimum image convention (mic=True)
     water_groups = {}
-    for h_local_idx, o_local_idx in enumerate(closest_o):
-        if min_dists[h_local_idx] < 1.3:
-            o_idx = o_indices[o_local_idx]
-            h_idx = h_indices[h_local_idx]
+    for h_idx in h_indices:
+        dists = atoms.get_distances(h_idx, o_indices, mic=True)
+        min_idx = int(np.argmin(dists))
+        if dists[min_idx] < 1.3:  # covalent O-H bond cutoff
+            o_idx = o_indices[min_idx]
             water_groups.setdefault(o_idx, []).append(h_idx)
 
     cur_mol = 2

@@ -1,0 +1,508 @@
+================================================================================
+    COMPREHENSIVE COMPARATIVE AUDIT & INCONSISTENCY ANALYSIS:
+    AIMS-PAX ACTIVE LEARNING PIPELINE vs. PAINN-AL REPRODUCTION
+================================================================================
+Date: September 2026
+Target Repositories:
+  - Reference Pipeline: aims-PAX (https://github.com/tohenkes/aims-PAX)
+  - Reproduction Script: PaiNN_active_learning (https://github.com/mecrist/PaiNN_active_learning)
+Primary Files Audited:
+  * aims-PAX:
+      - src/aims_PAX/procedures/active_learning.py
+      - src/aims_PAX/procedures/al_managers.py
+      - src/aims_PAX/procedures/preparation.py
+      - src/aims_PAX/tools/uncertainty.py
+      - src/aims_PAX/tools/model_tools/train_epoch.py
+      - src/aims_PAX/settings/project.py
+  * PaiNN_active_learning:
+      - run_painn_active_learning.py
+      - al_5A_painn/run_painn_al_5A.py
+      - painn_ensemble_calc.py
+      - retrain_engine.py
+      - dft_interface.py
+      - lammps_dumps.py
+      - benchmark_pipeline.py
+================================================================================
+
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+1. EXECUTIVE SUMMARY & AUDIT VERDICT
+2. CRITICAL PHYSICAL & IMPLEMENTATION BUGS (HIGH PRIORITY)
+   2.1 Missing Periodic Boundary Conditions (PBC) & Zero Cell Offsets
+   2.2 Non-Translationally Invariant Virial Stress Calculation
+   2.3 Euclidean Distance Molecule Identification (PBC Boundary Distortion)
+   2.4 Unhandled DFT Failures & Rollback Absence in Master Script
+3. ALGORITHMIC DISCREPANCIES VS. AIMS-PAX ACTIVE LEARNING CORE
+   3.1 Adaptive Thresholding: Dynamic Running Mean vs. Monotonic Loosening
+   3.2 Uncertainty Formulation: Mathematical Scaling & Component Averaging
+   3.3 Data Partitioning: Validation Quota & Retraining Triggering
+   3.4 Model Retraining: Optimizer Reset vs. Persistent State
+   3.5 Absence of Post-Active Learning Convergence Phase (converge_al)
+4. ARCHITECTURAL & WORKFLOW DIFFERENCES
+   4.1 Task Concurrency: Asynchronous Distributed PARSL vs. Synchronous Blocking
+   4.2 MD Stepping Mechanics & Inference Overhead (dyn.run(1) loop)
+   4.3 Step-Counter Discrepancies Across Pipeline Scripts
+5. ACTIONABLE REMEDIATION & DROP-IN CODE FIXES
+   5.1 PBC-Aware Neighbor List & Batch Builder
+   5.2 True aims-PAX Rolling-Window Adaptive Threshold Engine
+   5.3 Fault-Tolerant DFT Runner with Checkpoint Rollback
+   5.4 Persistent Optimizer & Convergence Routine
+================================================================================
+
+
+================================================================================
+1. EXECUTIVE SUMMARY & AUDIT VERDICT
+================================================================================
+The standalone Python implementation in `PaiNN_active_learning` successfully
+captures the high-level spirit of active learning: driving molecular dynamics (MD)
+with a machine learning committee, flagging high-disagreement configurations,
+querying FHI-aims DFT single points, and updating the model ensemble.
+
+However, a rigorous line-by-line inspection against `aims-PAX` reveals substantial
+discrepancies in three major areas:
+  1. Physical Simulation Integrity: Crucial periodic boundary condition (PBC)
+     information is stripped during graph construction, causing PaiNN to model
+     infinite crystalline/slab systems as non-periodic finite clusters in vacuum.
+  2. Active Learning Dynamics: The adaptive thresholding algorithm is inverted
+     (it loosens monotonically by 2% on every acquisition instead of tightening
+     with model convergence via running-mean tracking).
+  3. Training & Data Handling: Validation splitting is absent or static, optimizers
+     are recreated from scratch every cycle (destroying Adam momentum), and no
+     post-AL convergence training phase is executed.
+
+
+================================================================================
+2. CRITICAL PHYSICAL & IMPLEMENTATION BUGS (HIGH PRIORITY)
+================================================================================
+
+--------------------------------------------------------------------------------
+2.1 MISSING PERIODIC BOUNDARY CONDITIONS (PBC) & ZERO CELL OFFSETS
+--------------------------------------------------------------------------------
+* Location:
+    - painn_ensemble_calc.py (Lines 59-72)
+    - retrain_engine.py (Lines 91-101)
+
+* Current Implementation:
+    ```python
+    # painn_ensemble_calc.py
+    pos = torch.tensor(atoms.get_positions(), dtype=torch.float32, device=self.device)
+    z = torch.tensor(atoms.get_atomic_numbers(), dtype=torch.long, device=self.device)
+    nbrs = get_neighbor_list(pos.cpu(), cutoff=self.cutoff, undirected=False).to(self.device)
+    offs = torch.zeros((nbrs.shape[0], 3), device=self.device)
+    ```
+
+* Mathematical & Physical Failure:
+    - All input systems (geometry_alpha_5.in, geometry_beta_5.in, etc.) define
+      periodic lattice vectors. For instance, beta_5 has Ly = 7.517 Angstroms.
+    - With a cutoff radius r_cut = 6.0 Angstroms, Ly is barely larger than r_cut.
+      An atom at y = 0.5 Angstroms is physically only 1.0 Angstrom away from the
+      periodic image of an atom at y = 7.0 Angstroms.
+    - By calling `get_neighbor_list(pos)` without cell/pbc and hardcoding
+      `offs = torch.zeros(...)`:
+        1. No edges are constructed across periodic unit cell boundaries.
+        2. Atoms near the boundary see empty vacuum instead of their periodic neighbors.
+        3. When atoms diffuse across cell boundaries during Langevin MD, bonds
+           artificially snap or vanish, resulting in severe unphysical force spikes
+           and artificial uncertainty triggers.
+
+* Remediation:
+    Construct neighbor graphs using ASE's `neighbor_list` with `pbc=True`:
+    ```python
+    from ase.neighborlist import neighbor_list
+    i, j, S = neighbor_list("ijS", atoms, cutoff=self.cutoff)
+    nbrs = torch.tensor(np.stack([i, j], axis=0), dtype=torch.long, device=self.device)
+    cart_offsets = np.dot(S, atoms.get_cell())
+    offs = torch.tensor(cart_offsets, dtype=torch.float32, device=self.device)
+    ```
+
+--------------------------------------------------------------------------------
+2.2 NON-TRANSLATIONALLY INVARIANT VIRIAL STRESS CALCULATION
+--------------------------------------------------------------------------------
+* Location:
+    - painn_ensemble_calc.py (Lines 114-120)
+
+* Current Implementation:
+    ```python
+    pos = self.atoms.get_positions()
+    atomic_virial = - pos * mean_forces  # (N, 3) in eV
+    total_virial_diag = np.sum(atomic_virial, axis=0) / vol
+    stress_voigt = np.array([total_virial_diag[0], total_virial_diag[1], total_virial_diag[2], 0.0, 0.0, 0.0])
+    ```
+
+* Mathematical & Physical Failure:
+    - The true virial stress tensor is defined via relative pairwise displacement
+      vectors: W = - 1/2 * sum_{i != j} r_ij (x) F_ij.
+    - Using absolute coordinates (- r_i * F_i) is NOT translationally invariant.
+      If the system is translated by Delta_r, the computed stress shifts by
+      - Delta_r * sum_i F_i.
+    - For unwrapped trajectory dumps (`xu`, `yu`, `zu`), as atoms diffuse away
+      from the origin, this stress proxy diverges linearly with coordinate magnitude.
+    - Off-diagonal shear stresses are hardcoded to 0.0, which misrepresents
+      orthorhombic/triclinic shear strain.
+
+* Remediation:
+    In aims-PAX, stress is extracted from FHI-aims analytical stress (`REF_stress`).
+    If PaiNN is not trained to predict virial strain derivatives (dE / d_epsilon),
+    this output should be flagged as an uncalibrated diagnostic proxy rather than
+    a physical virial stress.
+
+--------------------------------------------------------------------------------
+2.3 EUCLIDEAN MOLECULE IDENTIFICATION (PBC BOUNDARY DISTORTION)
+--------------------------------------------------------------------------------
+* Location:
+    - lammps_dumps.py (Lines 40-42)
+
+* Current Implementation:
+    ```python
+    dists = cdist(pos[o_indices], pos[h_indices])
+    ```
+
+* Mathematical & Physical Failure:
+    - `scipy.spatial.distance.cdist` computes non-periodic Euclidean distances.
+    - Any water molecule where Hydrogen has crossed the periodic boundary while
+      Oxygen remains inside will measure dist > L_box - 1.3 Angstroms.
+    - As a result, water molecules crossing the boundary at step 0 are misclassified
+      as slab atoms (`mol_id = 1`).
+    - Furthermore, `identify_molecules` is called strictly once at initialization,
+      making it impossible to track water dissociation or proton transfer.
+
+* Remediation:
+    Evaluate distances using ASE's periodic minimum image convention:
+    `atoms.get_distances(o_idx, h_indices, mic=True)`.
+
+--------------------------------------------------------------------------------
+2.4 UNHANDLED DFT FAILURES & ROLLBACK ABSENCE IN MASTER SCRIPT
+--------------------------------------------------------------------------------
+* Location:
+    - run_painn_active_learning.py (Lines 300-310)
+
+* Comparison with aims-PAX:
+    - aims-PAX (`active_learning.py` Lines 402-418): When an FHI-aims calculation
+      fails (e.g., SCF non-convergence on distorted geometry), aims-PAX catches
+      the failure, discards the point, and rolls back the trajectory to the
+      last known safe checkpoint (`MD_checkpoints[idx]`).
+    - PaiNN Master (`run_painn_active_learning.py`): Calls `run_aims_single_point`
+      unprotected. If FHI-aims raises `AimsCalculationError`, the entire active
+      learning script crashes immediately, aborting the multi-day job.
+    - Note: In `al_5A_painn/run_painn_al_5A.py`, a `try...except` rollback block
+      was implemented, but it was not backported to `run_painn_active_learning.py`.
+
+
+================================================================================
+3. ALGORITHMIC DISCREPANCIES VS. AIMS-PAX ACTIVE LEARNING CORE
+================================================================================
+
+--------------------------------------------------------------------------------
+3.1 ADAPTIVE THRESHOLDING: DYNAMIC RUNNING MEAN VS. MONOTONIC LOOSENING
+--------------------------------------------------------------------------------
+This is the single most important conceptual deviation between the two pipelines.
+
+* aims-PAX Algorithm (`uncertainty.py` & `al_managers.py`):
+    1. During MD, uncertainty U_t is evaluated every `skip_step_mlff` steps and
+       appended to a rolling history list `uncertainties`.
+    2. Once at least 10 evaluations are recorded, the threshold is computed as:
+         U_thresh = mean(uncertainties[-400:]) * (1.0 + c_x)
+    3. Conceptual Behavior:
+       - When the model is untrained, mean uncertainty is high -> threshold is loose.
+       - As DFT points are assimilated and the models improve, force disagreement
+         drops -> threshold naturally tightens!
+       - Only points that exceed the current noise floor of the model trigger DFT.
+       - Once dataset reaches `freeze_threshold_dataset`, threshold is locked.
+       - If no crossing occurs for `uncert_not_crossed_limit` (50,000 steps),
+         a DFT point is forced to prevent unmonitored phase-space drift.
+
+* PaiNN-AL Reproduction (`run_painn_active_learning.py` Line 333):
+    1. Threshold starts at a fixed constant (25.0 meV/Angstrom).
+    2. On EVERY trigger, it executes:
+         U_thresh = max(MIN_THRESHOLD, U_thresh * 1.02)
+    3. Conceptual Behavior:
+       - The threshold increases monotonically by 2% on every acquisition.
+       - After 50 DFT single points, U_thresh = 25.0 * (1.02^50) = 67.3 meV/A.
+       - After 100 DFT points, U_thresh = 25.0 * (1.02^100) = 181.1 meV/A.
+       - As the model acquires more data, the pipeline becomes LESS strict,
+         accepting higher and higher force errors and ceasing exploration!
+
+--------------------------------------------------------------------------------
+3.2 UNCERTAINTY FORMULATION: MATHEMATICAL SCALING & COMPONENT AVERAGING
+--------------------------------------------------------------------------------
+* Mathematical Definitions:
+
+  aims-PAX (`uncertainty.py` Lines 25-29):
+    sigma_i_PAX = sqrt( (1 / (3 * M)) * sum_{m=1}^M sum_{d in {x,y,z}} (F_{m,d}(i) - <F_d(i)>)^2 )
+    - Population variance (divided by M).
+    - Averaged over the 3 Cartesian directions (divided by 3 inside sqrt).
+    - Units: eV / Angstrom.
+
+  PaiNN-AL (`painn_ensemble_calc.py` Lines 101-110):
+    sigma_i_PaiNN = sqrt( (1 / (M - 1)) * sum_{m=1}^M || F_m(i) - <F(i)> ||^2 ) * 1000.0
+    - Sample variance (Bessel-corrected, divided by M - 1).
+    - Summed over Cartesian directions (vector Euclidean norm).
+    - Units: meV / Angstrom (scaled by 1000).
+
+* Numerical Conversion Factor:
+    sigma_i_PaiNN = sqrt( (3 * M) / (M - 1) ) * 1000 * sigma_i_PAX
+
+    For M = 3 models:
+      sqrt( 9 / 2 ) * 1000 = sqrt(4.5) * 1000 approx 2121.32 * sigma_i_PAX
+    For M = 6 models:
+      sqrt( 18 / 5 ) * 1000 = sqrt(3.6) * 1000 approx 1897.37 * sigma_i_PAX
+
+* Practical Impact:
+    A threshold of 25.0 meV/Angstrom in PaiNN corresponds to:
+      25.0 / 2121.32 = 0.0118 eV/Angstrom (11.8 meV/Angstrom in aims-PAX metric).
+    Adopting published aims-PAX numerical threshold values without accounting for
+    this factor of ~2.12x will cause over-sampling or under-sampling.
+
+--------------------------------------------------------------------------------
+3.3 DATA PARTITIONING: VALIDATION QUOTA & RETRAINING TRIGGERING
+--------------------------------------------------------------------------------
+* aims-PAX Protocol (`al_managers.py` Lines 120-144):
+    - When a DFT calculation returns a labeled point:
+        valid_quota = valid_ratio * total_points_added
+        if valid_points_added < valid_quota:
+            Add to valid.xyz
+            Trajectory status -> "running"  (NO retraining is triggered!)
+        else:
+            Add to train.xyz
+            Trajectory status -> "training" (triggers 2 epochs of retraining)
+    - 10% of newly discovered points go directly to testing generalization.
+
+* PaiNN-AL Reproduction:
+    - 100% of newly labeled DFT points are written to `al_dataset.xyz`.
+    - In `retrain_engine.py`:
+        `validation_loader = train_loader`
+      The validation loader is literally a duplicate pointer to the training data.
+    - Every single point triggers retraining unconditionally.
+
+--------------------------------------------------------------------------------
+3.4 MODEL RETRAINING: OPTIMIZER RESET VS. PERSISTENT STATE
+--------------------------------------------------------------------------------
+* aims-PAX Protocol:
+    - Optimizer instances and learning rate schedulers persist across active
+      learning cycles.
+    - Momentum buffers (Adam first and second moments) maintain historical
+      curvature information.
+
+* PaiNN-AL Reproduction (`retrain_engine.py` Line 159):
+    ```python
+    optimizer = Adam(trainable_params, lr=lr)
+    ```
+    - A brand new Adam optimizer is instantiated on every single AL cycle.
+    - All momentum and adaptive learning rate state are wiped out.
+    - Training runs for only `FINE_TUNE_EPOCHS = 1`. In a dataset of 150 frames,
+      the newly added transition state appears in exactly one batch of 4 frames,
+      updating the weights only once with a small step (lr = 1e-4).
+
+--------------------------------------------------------------------------------
+3.5 ABSENCE OF POST-ACTIVE LEARNING CONVERGENCE PHASE (converge_al)
+--------------------------------------------------------------------------------
+* aims-PAX Protocol (`cli/al_procedure_only.py` Line 49):
+    - When all trajectories complete or dataset limits are reached, aims-PAX
+      invokes `al.converge()`.
+    - Runs a dedicated 50-100 epoch convergence training with learning rate decay
+      (`ReduceLROnPlateau`), early stopping patience, and selects the single
+      best model based on held-out validation loss.
+
+* PaiNN-AL Reproduction:
+    - Halts immediately when `MAX_MD_STEPS` or `MAX_DFT_POINTS` is reached.
+    - Models remain with weights from the single last 1-epoch fine-tuning step.
+
+
+================================================================================
+4. ARCHITECTURAL & WORKFLOW DIFFERENCES
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1 TASK CONCURRENCY: ASYNCHRONOUS PARSL VS. SYNCHRONOUS BLOCKING
+--------------------------------------------------------------------------------
+* aims-PAX Architecture:
+    - Decoupled heterogeneous HPC workflow using Parsl / WorkQueue.
+    - GPU node runs ML MD propagation. When Trajectory A triggers DFT, only
+      Trajectory A pauses ("waiting"). Trajectories B through J continue MD
+      on the GPU concurrently.
+    - Slurm worker blocks on CPU nodes execute FHI-aims in parallel.
+
+* PaiNN-AL Architecture:
+    - Synchronous single-node loop (1 GPU + 32 CPU cores).
+    - When any trajectory triggers DFT, ALL trajectories freeze.
+    - The GPU remains 100% idle while the 32 CPU cores compute FHI-aims.
+    - Note: This was a deliberate design choice by the author to avoid queue
+      delays on shared clusters, but it eliminates multi-trajectory concurrency.
+
+--------------------------------------------------------------------------------
+4.2 MD STEPPING MECHANICS & INFERENCE OVERHEAD (dyn.run(1) loop)
+--------------------------------------------------------------------------------
+* Location: `run_painn_active_learning.py` (Lines 251-255)
+    ```python
+    for _ in range(SKIP_STEP_MLFF):
+        dyn.run(1)
+        step += 1
+        self.current_steps[traj_idx] = step
+    ```
+* Analysis:
+    - ASE `Langevin` driver calls `atoms.get_forces()` at every step.
+    - Because `PainnEnsembleCalculator` evaluates all 6 models during every
+      `calculate()` call, running `dyn.run(1)` 25 times in Python executes
+      6 full forward and backward passes on the GPU on every single MD step.
+    - In aims-PAX, `md_drivers[idx].run(25)` runs the internal C/Fortran
+      propagation loop, reducing Python loop overhead. Dumps should be managed
+      via `dyn.attach(dump_callback, interval=1000)` rather than manual looping.
+
+--------------------------------------------------------------------------------
+4.3 STEP-COUNTER DISCREPANCIES ACROSS PIPELINE SCRIPTS
+--------------------------------------------------------------------------------
+* Comparison between scripts in `PaiNN_active_learning`:
+    - In `run_painn_active_learning.py`:
+      `step` is tracked per trajectory (`self.current_steps[traj_idx]`).
+      Each trajectory runs until `step >= MAX_MD_STEPS`.
+    - In `al_5A_painn/run_painn_al_5A.py` (Lines 379-388):
+      `self.step += 1` is updated in the outer while loop across ALL trajectories.
+      If there are 3 trajectories, the simulation terminates when each trajectory
+      has only completed `MAX_MD_STEPS / 3` steps (~3,333 steps instead of 10,000).
+    - Furthermore, `run_painn_al_5A.py` evaluates uncertainty after EVERY step
+      (omitting `SKIP_STEP_MLFF = 25`), causing unnecessary inference overhead.
+
+
+================================================================================
+5. ACTIONABLE REMEDIATION & DROP-IN CODE FIXES
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1 PBC-AWARE NEIGHBOR LIST & BATCH BUILDER
+--------------------------------------------------------------------------------
+Replace `_build_batch` in `painn_ensemble_calc.py` and graph construction in
+`retrain_engine.py` with:
+
+```python
+import torch
+import numpy as np
+from ase.neighborlist import neighbor_list
+
+def build_pbc_painn_batch(atoms, cutoff, device):
+    """
+    Constructs a PaiNN NFF batch dictionary fully supporting
+    Periodic Boundary Conditions (PBC) and cell offsets.
+    """
+    pos = atoms.get_positions()
+    z = atoms.get_atomic_numbers()
+    cell = atoms.get_cell()
+    pbc = atoms.get_pbc()
+
+    # Use ASE periodic neighbor list
+    if any(pbc):
+        i, j, S = neighbor_list("ijS", atoms, cutoff=cutoff)
+        nbr_tensor = torch.tensor(np.stack([i, j], axis=0), dtype=torch.long, device=device)
+        cart_offsets = np.dot(S, cell)
+        offsets_tensor = torch.tensor(cart_offsets, dtype=torch.float32, device=device)
+    else:
+        # Non-periodic fallback
+        from nff.data.graphs import get_neighbor_list
+        pos_t = torch.tensor(pos, dtype=torch.float32)
+        nbr_tensor = get_neighbor_list(pos_t, cutoff=cutoff, undirected=False).to(device)
+        offsets_tensor = torch.zeros((nbr_tensor.shape[0], 3), device=device)
+
+    pos_tensor = torch.tensor(pos, dtype=torch.float32, device=device)
+    z_tensor = torch.tensor(z, dtype=torch.long, device=device)
+    nxyz = torch.cat([z_tensor.view(-1, 1).float(), pos_tensor], dim=1)
+
+    batch = {
+        "nxyz": nxyz,
+        "nbr_list": nbr_tensor,
+        "offsets": offsets_tensor,
+        "num_atoms": torch.tensor([len(atoms)], device=device),
+    }
+    return batch
+```
+
+--------------------------------------------------------------------------------
+5.2 TRUE AIMS-PAX ROLLING-WINDOW ADAPTIVE THRESHOLD ENGINE
+--------------------------------------------------------------------------------
+Implement aims-PAX threshold dynamics in your active learning manager:
+
+```python
+class AimsPaxThresholdManager:
+    def __init__(self, initial_threshold=25.0, c_x=0.0, max_history=400, freeze_dataset_size=150):
+        self.threshold = initial_threshold
+        self.c_x = c_x
+        self.max_history = max_history
+        self.freeze_dataset_size = freeze_dataset_size
+        self.uncertainty_history = []
+        self.frozen = False
+
+    def update(self, current_uncertainty, current_dataset_size):
+        self.uncertainty_history.append(float(current_uncertainty))
+
+        # Check if threshold should be frozen
+        if current_dataset_size >= self.freeze_dataset_size and not self.frozen:
+            print(f"[THRESHOLD] Freezing threshold at {self.threshold:.2f} meV/A")
+            self.frozen = True
+            return self.threshold
+
+        if not self.frozen and len(self.uncertainty_history) >= 10:
+            recent = self.uncertainty_history[-self.max_history:]
+            avg_u = float(np.mean(recent))
+            self.threshold = avg_u * (1.0 + self.c_x)
+
+        return self.threshold
+```
+
+--------------------------------------------------------------------------------
+5.3 FAULT-TOLERANT DFT RUNNER WITH CHECKPOINT ROLLBACK
+--------------------------------------------------------------------------------
+Wrap DFT execution in `run_painn_active_learning.py` to prevent fatal job crashes:
+
+```python
+# Save safe rollback coordinate before propagation
+safe_positions = atoms.get_positions().copy()
+safe_velocities = atoms.get_velocities().copy()
+
+try:
+    e_dft, f_dft, calc_dir = run_aims_single_point(
+        atoms=atoms,
+        dft_root_dir=DFT_CALCS_DIR,
+        step=step,
+        traj_idx=traj_idx,
+        control_in_path=CONTROL_IN,
+        species_dir=SPECIES_DIR,
+        aims_bin=AIMS_BIN,
+        n_cores=N_MPI_CORES,
+    )
+except AimsCalculationError as err:
+    print(f"\n[DFT FAILED] Calculation failed at step {step} for traj {traj_idx}!")
+    print(f"Rolling back trajectory to last safe checkpoint...")
+    atoms.set_positions(safe_positions)
+    atoms.set_velocities(safe_velocities)
+    # Temporarily loosen threshold to push past the problematic state
+    self.threshold *= 1.05
+    continue
+```
+
+--------------------------------------------------------------------------------
+5.4 PERSISTENT OPTIMIZER & CONVERGENCE ROUTINE
+--------------------------------------------------------------------------------
+1. Persist Adam optimizers in `retrain_ensemble`:
+```python
+# Pass existing optimizers dict: optimizers = {idx: Adam(model.parameters(), lr=1e-4)}
+def retrain_ensemble(calculator, dataset_path, optimizers, n_epochs=2, ...):
+    for idx, model in enumerate(calculator.models):
+        opt = optimizers[idx]
+        trainer = Trainer(
+            model=model,
+            optimizer=opt,
+            train_loader=train_loader,
+            ...
+        )
+        trainer.train(...)
+```
+
+2. Add a final convergence training phase at the end of `pipeline.run()`:
+```python
+def run_final_convergence(calculator, dataset_path, epochs=50):
+    print("\n[CONVERGENCE] Running final training on complete dataset...")
+    # Train best model or committee for 50 epochs with ReduceLROnPlateau
+    # and save final production weights to 'results/converged_models/'
+```
+
+================================================================================
+                                END OF AUDIT
+================================================================================

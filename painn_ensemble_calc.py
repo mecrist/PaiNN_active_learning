@@ -57,16 +57,34 @@ class PainnEnsembleCalculator(Calculator):
         print(f"[PainnEnsembleCalculator] Successfully loaded {len(self.models)} PaiNN models.")
 
     def _build_batch(self, atoms):
-        pos = torch.tensor(atoms.get_positions(), dtype=torch.float32, device=self.device)
-        z = torch.tensor(atoms.get_atomic_numbers(), dtype=torch.long, device=self.device)
-        nbrs = get_neighbor_list(pos.cpu(), cutoff=self.cutoff, undirected=False).to(self.device)
-        offs = torch.zeros((nbrs.shape[0], 3), device=self.device)
-        nxyz = torch.cat([z.view(-1, 1).float(), pos], dim=1)
+        pos = atoms.get_positions()
+        z = atoms.get_atomic_numbers()
+        cell = atoms.get_cell()
+        pbc = atoms.get_pbc()
+
+        if any(pbc):
+            from ase.neighborlist import neighbor_list
+            i, j, S = neighbor_list("ijS", atoms, cutoff=self.cutoff)
+            if len(i) > 0:
+                nbr_tensor = torch.tensor(np.stack([i, j], axis=1), dtype=torch.long, device=self.device)
+                cart_offsets = np.dot(S, cell)
+                offsets_tensor = torch.tensor(cart_offsets, dtype=torch.float32, device=self.device)
+            else:
+                nbr_tensor = torch.empty((0, 2), dtype=torch.long, device=self.device)
+                offsets_tensor = torch.empty((0, 3), dtype=torch.float32, device=self.device)
+        else:
+            pos_t = torch.tensor(pos, dtype=torch.float32)
+            nbr_tensor = get_neighbor_list(pos_t, cutoff=self.cutoff, undirected=False).to(self.device)
+            offsets_tensor = torch.zeros((nbr_tensor.shape[0], 3), device=self.device)
+
+        pos_tensor = torch.tensor(pos, dtype=torch.float32, device=self.device)
+        z_tensor = torch.tensor(z, dtype=torch.long, device=self.device)
+        nxyz = torch.cat([z_tensor.view(-1, 1).float(), pos_tensor], dim=1)
 
         batch = {
             "nxyz": nxyz,
-            "nbr_list": nbrs,
-            "offsets": offs,
+            "nbr_list": nbr_tensor,
+            "offsets": offsets_tensor,
             "num_atoms": torch.tensor([len(atoms)], device=self.device),
         }
         return batch
@@ -109,12 +127,14 @@ class PainnEnsembleCalculator(Calculator):
         std_per_atom = np.sqrt(var) * 1000.0  # meV/Angstrom
         max_atomic_sd = float(np.max(std_per_atom))
 
-        # Atomic stress / virial proxy (r_i (x) F_i)
-        # c_stress: [c_stress[1], c_stress[2], c_stress[3]] = - [x*Fx, y*Fy, z*Fz]
-        pos = self.atoms.get_positions()
-        atomic_virial = - pos * mean_forces  # (N, 3) in eV
+        # Atomic stress / virial diagnostic proxy (r_i (x) F_i)
+        # Shifted relative to centroid (and wrapped if PBC) for translational invariance.
+        # Note: PaiNN is not trained on analytical virials; this serves as an uncalibrated diagnostic proxy.
+        pos_diag = self.atoms.get_positions(wrap=True) if any(self.atoms.get_pbc()) else self.atoms.get_positions()
+        pos_rel = pos_diag - np.mean(pos_diag, axis=0)
+        atomic_virial = - pos_rel * mean_forces  # (N, 3) in eV
 
-        # Voigt stress tensor (xx, yy, zz, yz, xz, xy)
+        # Voigt stress tensor diagnostic proxy (xx, yy, zz, yz, xz, xy)
         vol = abs(self.atoms.get_volume()) if self.atoms.cell and self.atoms.cell.volume > 0 else 1.0
         total_virial_diag = np.sum(atomic_virial, axis=0) / vol  # eV/Angstrom^3
         stress_voigt = np.array([total_virial_diag[0], total_virial_diag[1], total_virial_diag[2], 0.0, 0.0, 0.0])

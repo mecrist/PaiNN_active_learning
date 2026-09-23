@@ -31,8 +31,39 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 
 from painn_ensemble_calc import PainnEnsembleCalculator
 from lammps_dumps import write_lammps_dump, identify_molecules
-from dft_interface import run_aims_single_point
-from retrain_engine import retrain_ensemble
+from dft_interface import run_aims_single_point, AimsCalculationError
+from retrain_engine import retrain_ensemble, run_final_convergence
+
+
+class AimsPaxThresholdManager:
+    """
+    Rolling-window adaptive threshold engine following aims-PAX uncertainty protocol.
+    Dynamically tightens the threshold as model uncertainty improves.
+    """
+    def __init__(self, initial_threshold=25.0, c_x=0.0, max_history=400, freeze_dataset_size=150, min_history=10):
+        self.initial_threshold = initial_threshold
+        self.threshold = initial_threshold
+        self.c_x = c_x
+        self.max_history = max_history
+        self.freeze_dataset_size = freeze_dataset_size
+        self.min_history = min_history
+        self.uncertainty_history = []
+        self.frozen = False
+
+    def update(self, current_uncertainty, current_dataset_size):
+        self.uncertainty_history.append(float(current_uncertainty))
+
+        if current_dataset_size >= self.freeze_dataset_size and not self.frozen:
+            print(f"[THRESHOLD] Freezing threshold at {self.threshold:.2f} meV/A (dataset size: {current_dataset_size})")
+            self.frozen = True
+            return self.threshold
+
+        if not self.frozen and len(self.uncertainty_history) >= self.min_history:
+            recent = self.uncertainty_history[-self.max_history:]
+            avg_u = float(np.mean(recent))
+            self.threshold = avg_u * (1.0 + self.c_x)
+
+        return self.threshold
 
 # ==============================================================================
 # CONFIGURATION & PATHS
@@ -104,10 +135,16 @@ class ALPipeline:
         DFT_CALCS_DIR.mkdir(parents=True, exist_ok=True)
         CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
 
+        self.threshold_mgr = AimsPaxThresholdManager(
+            initial_threshold=INITIAL_THRESHOLD,
+            c_x=0.0,
+            freeze_dataset_size=150,
+        )
         self.threshold = INITIAL_THRESHOLD
         self.total_dft_evals = 0
         self.cycle_count = 0
         self.current_steps = {i: 0 for i in range(len(GEOMETRY_NAMES))}
+        self.last_checkpoints = {}
 
         # Initialize dataset if missing
         if not DATASET_PATH.exists():
@@ -132,6 +169,12 @@ class ALPipeline:
             cutoff=6.0,
             device=self.device,
         )
+
+        # Persistent Adam optimizers across AL cycles
+        self.optimizers = {
+            i: torch.optim.Adam(filter(lambda p: p.requires_grad, m.parameters()), lr=1e-4)
+            for i, m in enumerate(self.calculator.models)
+        }
 
         # Setup 9 trajectories
         self.trajectories = []
@@ -247,41 +290,50 @@ class ALPipeline:
                     continue
                 all_done = False
 
+                # Save safe coordinates before propagation
+                safe_pos = atoms.get_positions().copy()
+                safe_vel = atoms.get_velocities().copy()
+
                 # 1. Propagate MD for SKIP_STEP_MLFF steps
-                for _ in range(SKIP_STEP_MLFF):
-                    dyn.run(1)
-                    step += 1
-                    self.current_steps[traj_idx] = step
+                dyn.run(SKIP_STEP_MLFF)
+                step += SKIP_STEP_MLFF
+                self.current_steps[traj_idx] = step
 
-                    # Trajectory dumps
-                    if step % DUMP_INTERVAL_UNIFIED == 0:
-                        dump_file = TRAJECTORIES_DIR / f"traj_traj{traj_idx}.lammpstrj"
-                        write_lammps_dump(
-                            filename=dump_file,
-                            step=step,
-                            atoms=atoms,
-                            mol_ids=mol_id,
-                            stress=None,
-                            append=True,
-                        )
+                # Trajectory dumps with dynamic molecule identification
+                if step % DUMP_INTERVAL_UNIFIED == 0:
+                    dump_file = TRAJECTORIES_DIR / f"traj_traj{traj_idx}.lammpstrj"
+                    mol_ids = identify_molecules(atoms)
+                    write_lammps_dump(
+                        filename=dump_file,
+                        step=step,
+                        atoms=atoms,
+                        mol_ids=mol_ids,
+                        stress=None,
+                        append=True,
+                    )
 
-                    if step % DUMP_INTERVAL_STRESS == 0:
-                        calc_res = atoms.calc.results
-                        stress_diag = calc_res.get("atomic_stress", np.zeros((len(atoms), 3)))
-                        stress_file = TRAJECTORIES_DIR / f"traj_stress_traj{traj_idx}.lammpstrj"
-                        write_lammps_dump(
-                            filename=stress_file,
-                            step=step,
-                            atoms=atoms,
-                            mol_ids=mol_id,
-                            stress=stress_diag,
-                            append=True,
-                        )
+                if step % DUMP_INTERVAL_STRESS == 0:
+                    calc_res = atoms.calc.results
+                    stress_diag = calc_res.get("atomic_stress", np.zeros((len(atoms), 3)))
+                    stress_file = TRAJECTORIES_DIR / f"traj_stress_traj{traj_idx}.lammpstrj"
+                    mol_ids = identify_molecules(atoms)
+                    write_lammps_dump(
+                        filename=stress_file,
+                        step=step,
+                        atoms=atoms,
+                        mol_ids=mol_ids,
+                        stress=stress_diag,
+                        append=True,
+                    )
 
                 # 2. Evaluate Uncertainty at Current Step
                 calc_res = atoms.calc.results
-                uncertainty = calc_res.get("max_atomic_sd", 0.0)
-                mean_energy = calc_res.get("energy", 0.0)
+                uncertainty = float(calc_res.get("max_atomic_sd", 0.0))
+                mean_energy = float(calc_res.get("energy", 0.0))
+
+                # Update rolling adaptive threshold
+                current_ds_size = len(read(str(DATASET_PATH), index=":"))
+                self.threshold = self.threshold_mgr.update(uncertainty, current_ds_size)
 
                 print(
                     f"[{GEOMETRY_NAMES[traj_idx]} | Step {step:05d}] "
@@ -296,17 +348,25 @@ class ALPipeline:
                         f"crossed uncertainty threshold: {uncertainty:.2f} > {self.threshold:.2f} meV/A!"
                     )
 
-                    # A. Execute Local FHI-aims DFT (32 cores)
-                    e_dft, f_dft, calc_dir = run_aims_single_point(
-                        atoms=atoms,
-                        dft_root_dir=DFT_CALCS_DIR,
-                        step=step,
-                        traj_idx=traj_idx,
-                        control_in_path=CONTROL_IN,
-                        species_dir=SPECIES_DIR,
-                        aims_bin=AIMS_BIN,
-                        n_cores=N_MPI_CORES,
-                    )
+                    # A. Execute Local FHI-aims DFT (32 cores) with failure capture & rollback
+                    try:
+                        e_dft, f_dft, calc_dir = run_aims_single_point(
+                            atoms=atoms,
+                            dft_root_dir=DFT_CALCS_DIR,
+                            step=step,
+                            traj_idx=traj_idx,
+                            control_in_path=CONTROL_IN,
+                            species_dir=SPECIES_DIR,
+                            aims_bin=AIMS_BIN,
+                            n_cores=N_MPI_CORES,
+                        )
+                    except AimsCalculationError as err:
+                        print(f"\n[DFT FAILED] Calculation failed at step {step} for traj {traj_idx}: {err}")
+                        print("Rolling back trajectory to last safe checkpoint...")
+                        atoms.set_positions(safe_pos)
+                        atoms.set_velocities(safe_vel)
+                        continue
+
                     self.total_dft_evals += 1
                     self.cycle_count += 1
 
@@ -316,7 +376,7 @@ class ALPipeline:
                     labeled_atoms.arrays["REF_forces"] = f_dft
                     write(str(DATASET_PATH), labeled_atoms, format="extxyz", append=True)
 
-                    # C. Retrain the 6 PaiNN committee members (1 epoch)
+                    # C. Retrain the 6 PaiNN committee members with persistent optimizers
                     retrain_ensemble(
                         calculator=self.calculator,
                         dataset_path=DATASET_PATH,
@@ -327,20 +387,31 @@ class ALPipeline:
                         batch_size=4,
                         lr=1e-4,
                         device=self.device,
+                        optimizers=self.optimizers,
                     )
 
-                    # D. Dynamically relax threshold
-                    self.threshold = max(MIN_THRESHOLD, self.threshold * THRESHOLD_RELAX_FACTOR)
-                    print(f"[THRESHOLD UPDATE] New threshold relaxed to: {self.threshold:.2f} meV/A")
+                    # D. Update safe checkpoint
+                    self.last_checkpoints[traj_idx] = (atoms.get_positions().copy(), atoms.get_velocities().copy())
 
                     # E. Save pipeline state
                     self._save_checkpoint()
 
                     if self.total_dft_evals >= MAX_DFT_POINTS:
                         print(f"\n[FINISHED] Reached maximum DFT budget ({MAX_DFT_POINTS}). Active learning loop complete.")
-                        return
+                        break
 
-        print("\n[FINISHED] All 9 trajectories completed MD exploration.")
+            if self.total_dft_evals >= MAX_DFT_POINTS:
+                break
+
+        print("\n[MD EXPLORATION COMPLETE] Running post-active learning convergence...")
+        run_final_convergence(
+            calculator=self.calculator,
+            dataset_path=DATASET_PATH,
+            ref_energies=REF_ENERGIES,
+            output_dir=CHECKPOINTS_DIR / "converged_models",
+            n_epochs=50,
+            device=self.device,
+        )
         self._save_checkpoint()
 
 
