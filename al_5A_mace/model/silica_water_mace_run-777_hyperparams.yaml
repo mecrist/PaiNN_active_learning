@@ -1,0 +1,22 @@
+ARCHITECTURE:
+  MLP_irreps: 16x0e
+  avg_num_neighbors: 25.67638210051832
+  compute_avg_num_neighbors: true
+  correlation: 3
+  gate: silu
+  interaction: RealAgnosticResidualInteractionBlock
+  interaction_first: RealAgnosticResidualInteractionBlock
+  max_L: 1
+  max_ell: 3
+  model_choice: mace
+  num_channels: 128
+  num_cutoff_basis: 5
+  num_interactions: 2
+  num_radial_basis: 8
+  r_max: 5.0
+  radial_MLP:
+  - 64
+  - 64
+  - 64
+  radial_type: bessel
+  scaling: rms_forces_scaling

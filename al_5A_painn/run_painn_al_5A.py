@@ -50,9 +50,9 @@ from retrain_engine import retrain_ensemble, run_final_convergence
 class AimsPaxThresholdManager:
     """
     Rolling-window adaptive threshold engine following aims-PAX uncertainty protocol.
-    Dynamically tightens the threshold as model uncertainty improves.
+    Dynamically adjusts the threshold as model uncertainty evolves.
     """
-    def __init__(self, initial_threshold=25.0, c_x=0.0, max_history=400, freeze_dataset_size=540, min_history=10):
+    def __init__(self, initial_threshold=float("inf"), c_x=0.0, max_history=400, freeze_dataset_size=540, min_history=10):
         self.initial_threshold = initial_threshold
         self.threshold = initial_threshold
         self.c_x = c_x
@@ -66,11 +66,11 @@ class AimsPaxThresholdManager:
         self.uncertainty_history.append(float(current_uncertainty))
 
         if current_dataset_size >= self.freeze_dataset_size and not self.frozen:
-            print(f"[THRESHOLD] Freezing threshold at {self.threshold:.2f} meV/A (dataset size: {current_dataset_size})")
+            print(f"[THRESHOLD] Freezing threshold at {self.threshold:.4f} eV/A (dataset size: {current_dataset_size})")
             self.frozen = True
             return self.threshold
 
-        if not self.frozen and len(self.uncertainty_history) >= self.min_history:
+        if not self.frozen and len(self.uncertainty_history) > self.min_history:
             recent = self.uncertainty_history[-self.max_history:]
             avg_u = float(np.mean(recent))
             self.threshold = avg_u * (1.0 + self.c_x)
@@ -108,10 +108,10 @@ MAX_MD_STEPS = 10000
 SKIP_STEP_MLFF = 25
 DUMP_EVERY_D1 = 1000
 DUMP_EVERY_D2 = 5000
-INITIAL_U_THRESH = 25.0
+INITIAL_U_THRESH = float("inf")
 VALID_RATIO = 0.1
 MAX_AL_CYCLES = 50
-DESIRED_ACC_FORCE_MAE = 50.0  # meV/A (target Force MAE on validation set to stop early; set None to disable)
+DESIRED_ACC_FORCE_MAE = None  # Match aimsprobe.yaml (desired_acc=0.0): run full 10k steps unless max_train_set_size is reached
 
 
 class PainnActiveLearningManager5A:
@@ -277,7 +277,7 @@ class PainnActiveLearningManager5A:
         self.cycle += 1
         print("\n" + "=" * 80)
         print(f">>> [TRIGGER] Cycle {self.cycle} | Trajectory {traj_idx} ({self.trajectories[traj_idx]['name']})")
-        print(f">>> Uncertainty: {u_value:.2f} meV/A > Threshold: {self.u_thresh:.2f} meV/A")
+        print(f">>> Uncertainty: {u_value:.4f} eV/A > Threshold: {self.u_thresh:.4f} eV/A")
         print("=" * 80)
 
         # 1. Run FHI-aims single point (32 cores) with failure capture
@@ -309,7 +309,7 @@ class PainnActiveLearningManager5A:
                 f"\n{'=' * 80}\n"
                 f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"Trajectory: {traj_idx} ({self.trajectories[traj_idx]['name']}) | MD Step: {self.step}\n"
-                f"Uncertainty: {u_value:.2f} meV/A | Threshold: {self.u_thresh:.2f} meV/A\n"
+                f"Uncertainty: {u_value:.4f} eV/A | Threshold: {self.u_thresh:.4f} eV/A\n"
                 f"Preserved Folder: {failed_target}\n"
                 f"Error Message: {err}\n"
                 f"--- aims.out Error Snippet ---\n"
@@ -478,7 +478,8 @@ class PainnActiveLearningManager5A:
 
                 if t["step"] % 100 == 0:
                     temp = atoms.get_temperature()
-                    print(f"Step {t['step']:05d} | {t['name']} | T: {temp:.1f} K | U: {u:.2f} meV/A | Thresh: {self.u_thresh:.2f} meV/A")
+                    thresh_str = f"{self.u_thresh:.4f} eV/A" if np.isfinite(self.u_thresh) else "inf"
+                    print(f"Step {t['step']:05d} | {t['name']} | T: {temp:.1f} K | U: {u:.4f} eV/A | Thresh: {thresh_str}")
 
                 # Trigger condition
                 if u > self.u_thresh:

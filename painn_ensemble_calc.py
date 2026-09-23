@@ -22,9 +22,10 @@ class PainnEnsembleCalculator(Calculator):
       - 'energy': Committee mean energy shifted to raw DFT absolute scale (+ sum(E0)).
       - 'forces': Committee mean force vector per atom (eV/Angstrom).
       - 'stress': Global stress tensor in Voigt 6-vector format (eV/Angstrom^3).
-      - 'max_atomic_sd': Maximum atomic force standard deviation across committee (meV/Angstrom).
-      - 'std_per_atom': Atomic force standard deviation for each atom (meV/Angstrom).
+      - 'max_atomic_sd': Maximum atomic force standard deviation across committee following aims-PAX (eV/Angstrom).
+      - 'std_per_atom': Atomic force standard deviation for each atom following aims-PAX (eV/Angstrom).
       - 'atomic_stress': Diagonal per-atom virial components (xu*Fx, yu*Fy, zu*Fz).
+      - 'forces_comm': Committee member force predictions array of shape (M, N, 3) in eV/Angstrom.
     """
 
     implemented_properties = ["energy", "forces", "stress"]
@@ -116,16 +117,12 @@ class PainnEnsembleCalculator(Calculator):
         mean_energy = float(np.mean(energies_ev)) + e0_total
         mean_forces = np.mean(forces_ev_ang, axis=0)  # shape: (N, 3)
 
-        # Force disagreement: standard deviation across committee in meV/Angstrom
-        diff = forces_ev_ang - mean_forces[None, :, :]  # (M, N, 3)
-        diff_sq = np.sum(diff**2, axis=-1)  # (M, N)
-        # Sample standard deviation across models
-        if M > 1:
-            var = np.sum(diff_sq, axis=0) / (M - 1)
-        else:
-            var = np.zeros(len(self.atoms))
-        std_per_atom = np.sqrt(var) * 1000.0  # meV/Angstrom
-        max_atomic_sd = float(np.max(std_per_atom))
+        # Force disagreement: standard deviation across committee following aims-PAX exactly (in eV/Angstrom)
+        pred_av = np.average(forces_ev_ang, axis=0, keepdims=True)  # (1, N, 3)
+        diff_sq = (forces_ev_ang - pred_av) ** 2.0                 # (M, N, 3)
+        diff_sq_mean = np.mean(diff_sq, axis=(0, -1))             # (N,) mean over ensemble and xyz
+        std_per_atom = np.sqrt(diff_sq_mean)                      # (N,) in eV/Angstrom
+        max_atomic_sd = float(np.max(std_per_atom))               # in eV/Angstrom
 
         # Atomic stress / virial diagnostic proxy (r_i (x) F_i)
         # Shifted relative to centroid (and wrapped if PBC) for translational invariance.

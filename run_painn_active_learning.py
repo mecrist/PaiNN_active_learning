@@ -40,7 +40,7 @@ class AimsPaxThresholdManager:
     Rolling-window adaptive threshold engine following aims-PAX uncertainty protocol.
     Dynamically tightens the threshold as model uncertainty improves.
     """
-    def __init__(self, initial_threshold=25.0, c_x=0.0, max_history=400, freeze_dataset_size=150, min_history=10):
+    def __init__(self, initial_threshold=float("inf"), c_x=0.0, max_history=400, freeze_dataset_size=150, min_history=10):
         self.initial_threshold = initial_threshold
         self.threshold = initial_threshold
         self.c_x = c_x
@@ -54,11 +54,11 @@ class AimsPaxThresholdManager:
         self.uncertainty_history.append(float(current_uncertainty))
 
         if current_dataset_size >= self.freeze_dataset_size and not self.frozen:
-            print(f"[THRESHOLD] Freezing threshold at {self.threshold:.2f} meV/A (dataset size: {current_dataset_size})")
+            print(f"[THRESHOLD] Freezing threshold at {self.threshold:.4f} eV/A (dataset size: {current_dataset_size})")
             self.frozen = True
             return self.threshold
 
-        if not self.frozen and len(self.uncertainty_history) >= self.min_history:
+        if not self.frozen and len(self.uncertainty_history) > self.min_history:
             recent = self.uncertainty_history[-self.max_history:]
             avg_u = float(np.mean(recent))
             self.threshold = avg_u * (1.0 + self.c_x)
@@ -104,7 +104,7 @@ LANGEVIN_FRICTION = 0.002  # 1/fs
 SKIP_STEP_MLFF = 25        # evaluate uncertainty every 25 steps
 MAX_MD_STEPS = 10000       # max steps per trajectory
 MAX_DFT_POINTS = 100       # maximum new DFT single points
-INITIAL_THRESHOLD = 25.0   # meV/Angstrom
+INITIAL_THRESHOLD = float("inf")
 MIN_THRESHOLD = 20.0       # meV/Angstrom
 THRESHOLD_RELAX_FACTOR = 1.02  # 2% dynamic relaxation per added point
 FINE_TUNE_EPOCHS = 1       # 1 epoch default retraining

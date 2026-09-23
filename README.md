@@ -30,24 +30,26 @@ The pipeline explores complex mineral–water interfaces (alpha-quartz, beta-cri
 ## 📐 Scientific Methodology
 
 ### 1. Committee Force Disagreement (Uncertainty Metric)
-For an ensemble of $M = 6$ PaiNN models, each model $m$ predicts a force vector $\mathbf{F}_m(i)$ on atom $i$.
+Following the exact formulation of [aims-PAX](https://github.com/tohenkes/aims-PAX/tree/main):
+For an ensemble of $M$ models (3 or 6 members), each model $m$ predicts atomic forces $\mathbf{F}_m(i) \in \mathbb{R}^3$ on atom $i$.
 
 - **Committee Mean Force**:
   $$\bar{\mathbf{F}}(i) = \frac{1}{M} \sum_{m=1}^M \mathbf{F}_m(i)$$
 
-- **Atomic Force Standard Deviation**:
-  $$\sigma_i = \sqrt{\frac{1}{M - 1} \sum_{m=1}^M \left\| \mathbf{F}_m(i) - \bar{\mathbf{F}}(i) \right\|^2}$$
+- **Atomic Force Standard Deviation (per atom, in eV/Å)**:
+  $$\sigma_i = \sqrt{\frac{1}{3M} \sum_{m=1}^M \sum_{\alpha \in \{x,y,z\}} \left( F_{m,i,\alpha} - \bar{F}_{i,\alpha} \right)^2}$$
 
 - **Global Configuration Uncertainty**:
-  $$U = \max_{i \in \text{atoms}} \sigma_i \quad (\text{in meV/Å})$$
+  $$U = \max_{i \in \text{atoms}} \sigma_i \quad (\text{in eV/Å})$$
 
 Taking the **maximum** atomic standard deviation rather than the mean ensures that localized rare events (e.g., surface silanol protonation, water dissociation, Si–O bond breaking) are detected immediately without being diluted across the remaining bulk/slab atoms.
 
-### 2. Adaptive Thresholding
-- **Initial Threshold**: $U_{\text{thresh}} = 25.0\text{ meV/Å}$ (calibrated against well-converged PaiNN equilibrium force error).
-- **Dynamic Relaxation**:
-  $$U_{\text{thresh}} \leftarrow \max\left(U_{\min},\, U_{\text{thresh}} \times 1.02\right)$$
-  Relaxes the threshold by 2% after each DFT acquisition (with $U_{\min} = 20.0\text{ meV/Å}$) to prevent over-sampling the same basin and encourage broader phase-space exploration.
+### 2. Adaptive Rolling-Window Thresholding (aims-PAX Protocol)
+- **Initial Threshold**: $U_{\text{thresh}} = \infty$ (burn-in period).
+- **Burn-In Gate**: During the first 10 uncertainty evaluations ($250$ MD steps), no DFT calculations are triggered to allow thermalization and statistics accumulation.
+- **Dynamic Rolling-Window Update**:
+  $$U_{\text{thresh}} = \frac{1}{K} \sum_{k=1}^K U_{-k} \times (1 + c_x) \quad (K \le 400,\, c_x = 0.0)$$
+  Once the training set reaches the target size ($N \ge 540$), the threshold is permanently frozen.
 
 ### 3. Elemental Reference Energy ($E_0$) Offsets
 FHI-aims uses all-electron reference energies, yielding absolute energies of thousands of eV. PaiNN expects zero-centered target energies. Energies are shifted as:
@@ -62,22 +64,31 @@ where:
 ## 📂 Repository Architecture
 
 ```text
-├── geometries/                      # Initial starting structures (9 geometries)
-│   ├── geometry_10A_alpha.in        # Alpha-quartz with 10 A water layer
-│   ├── geometry_10A_amor.in         # Amorphous silica with 10 A water layer
-│   ├── geometry_10A_beta.in         # Beta-cristobalite with 10 A water layer
-│   ├── geometry_20A_alpha.in        # Alpha-quartz with 20 A water layer
-│   ├── geometry_20A_amor.in         # Amorphous silica with 20 A water layer
-│   ├── geometry_20A_beta.in         # Beta-cristobalite with 20 A water layer
+├── al_5A_painn/                     # 3-System (5 A gap) Closed-Loop PaiNN AL Pipeline
+│   ├── run_painn_al_5A.py           # Dedicated 5 A active learning orchestrator
+│   ├── run_painn_al_5A.slurm        # Slurm launch script (1 GPU + 32 CPU cores, etileno)
+│   ├── geometries/                  # 5 A silica-water interface geometries (.in)
+│   └── control.in                   # FHI-aims electronic structure parameters
+├── al_5A_mace/                      # Reference aims-PAX MACE Active Learning Pipeline
+│   ├── aimsprobe.yaml               # aims-PAX active learning settings
+│   ├── model.yaml                   # MACE equivariant architecture settings
+│   └── run_mace_al_5A.slurm         # Slurm launch script for aims-PAX MACE
+├── geometries/                      # Initial starting structures (9 geometries: 5, 10, 20 A)
 │   ├── geometry_alpha_5.in          # Alpha-quartz with 5 A water layer
 │   ├── geometry_amor_5.in           # Amorphous silica with 5 A water layer
-│   └── geometry_beta_5.in           # Beta-cristobalite with 5 A water layer
-├── painn_ensemble_calc.py           # 6-member PaiNN ASE Calculator & uncertainty engine
+│   ├── geometry_beta_5.in           # Beta-cristobalite with 5 A water layer
+│   └── ...                          # 10 A and 20 A interfaces
+├── painn_ensemble_calc.py           # PaiNN ASE Calculator & aims-PAX uncertainty engine
 ├── lammps_dumps.py                  # LAMMPS custom dump generator (unified & stress)
 ├── dft_interface.py                 # FHI-aims MPI runner & permanent archive manager
 ├── retrain_engine.py                # 1-epoch online fine-tuning engine with NaN guards
-├── run_painn_active_learning.py     # Master active learning orchestrator & state machine
+├── run_painn_active_learning.py     # Master 9-geometry active learning orchestrator
 ├── run_painn_al.slurm               # Slurm launch script (1 GPU + 32 CPU cores, 72h)
+├── compare_mace_vs_painn.py         # 500-step head-to-head MD trajectory comparison engine
+├── generate_comparison_analysis.py  # Comparative analysis & publication figure generator
+├── COMPARATIVE_ACTIVE_LEARNING_REPORT.md  # Comprehensive comparative benchmark report
+├── comparison_figures/              # Publication-quality comparison figures (.png, .pdf)
+├── benchmark_pipeline.py            # 7-kernel reproducibility verification suite
 ├── control.in                       # Base FHI-aims DFT parameters (PBE + Hirshfeld vdW)
 ├── .gitignore                       # Clean repository exclusions
 └── README.md                        # Documentation
