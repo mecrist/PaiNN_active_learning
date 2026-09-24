@@ -289,7 +289,7 @@ class PainnActiveLearningManager5A:
 
         # 1. Run FHI-aims single point (32 cores) with failure capture
         try:
-            e_dft, f_dft, calc_dir = run_aims_single_point(
+            e_dft, f_dft, calc_dir, *_ = run_aims_single_point(
                 atoms=atoms,
                 dft_root_dir=self.dft_dir,
                 step=self.step,

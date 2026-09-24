@@ -1,27 +1,29 @@
 #!/usr/bin/env python
 """
 ================================================================================
-   PAINN CLOSED-LOOP ACTIVE LEARNING PIPELINE: 5 ANGSTROM WATER GAP (3 SYSTEMS)
+   PAINN CLOSED-LOOP ACTIVE LEARNING PIPELINE WITH PARSL: 5 ANGSTROM WATER GAP
 ================================================================================
 Drives closed-loop active learning on the 3 silica-water interfaces with 5 A gap:
   1. geometry_alpha_5.in  (Alpha-quartz + 5 A water layer)
   2. geometry_amor_5.in   (Amorphous silica + 5 A water layer)
   3. geometry_beta_5.in   (Beta-cristobalite + 5 A water layer)
 
-Full Closed Loop:
-  - 3 fine-tuned PaiNN models (mine/model_2_ep500)
-  - MD at 300 K (ASE Langevin, dt=0.5 fs)
-  - Uncertainty metric: U = max_i sigma_i (force standard deviation)
-  - Threshold: U_thresh = 25.0 meV/A with dynamic relaxation
-  - On trigger (U > U_thresh):
-      1. Halts MD & archives structure in dft_calculations/
-      2. Executes local 32-core FHI-aims single point (mpirun -np 32 aims.x)
-      3. Shifts raw DFT energy with atomic baseline E0
-      4. Appends to al_dataset.xyz
-      5. Retrains 3 PaiNN committee members for 1 epoch
-      6. Reloads weights and resumes MD
-  - Dumps: unified LAMMPS dump every 1,000 steps; virial stress dump every 5,000 steps
-  - State tracking: al_checkpoint.json
+Key PARSL Asynchronous Architecture:
+  - Non-blocking Trajectory Propagation: When Trajectory i triggers an out-of-
+    distribution uncertainty state (U > U_thresh), it dispatches FHI-aims to
+    Parsl as a background task and enters 'waiting' status.
+  - Concurrent GPU MD: Other non-triggering trajectories continue propagating
+    Langevin dynamics on the GPU without idling for 15-20 minutes.
+  - Multi-threaded DFT Pool: Parsl ThreadPoolExecutor manages local 32-core MPI
+    FHI-aims executions safely in the background.
+  - Seamless Committee Fine-Tuning: Upon DFT completion, the new structure is
+    assimilated into the dataset, 3 PaiNN committee members undergo 1 epoch of
+    fine-tuning, all trajectory calculators are updated, and the trajectory resumes.
+  - Dynamic Adaptive Thresholding: U_thresh = mean(U[-400:]) * (1 + c_x) with
+    lower floor protection (min_threshold = 1.80 eV/A) and 100-step cooldowns.
+  - Robust Fault-Tolerance: Catches SCF convergence failures, rolls back to
+    safe checkpoints with stochastic velocity re-thermalization, avoiding
+    infinite rollback loops.
 ================================================================================
 """
 
@@ -41,46 +43,20 @@ from ase.io import read, write
 from ase.md.langevin import Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 
+import parsl
+from parsl.config import Config
+from parsl.executors import ThreadPoolExecutor
+from parsl.app.app import python_app
+
 from painn_ensemble_calc import PainnEnsembleCalculator, KCAL_TO_EV
 from lammps_dumps import write_lammps_dump, identify_molecules
 from dft_interface import run_aims_single_point, AimsCalculationError
 from retrain_engine import retrain_ensemble, run_final_convergence
 
 
-class AimsPaxThresholdManager:
-    """
-    Rolling-window adaptive threshold engine following aims-PAX uncertainty protocol.
-    Dynamically adjusts the threshold as model uncertainty evolves with margin and floor.
-    """
-    def __init__(self, initial_threshold=2.50, c_x=0.25, min_threshold=1.80, max_history=400, freeze_dataset_size=540, min_history=10):
-        self.initial_threshold = initial_threshold
-        self.threshold = initial_threshold
-        self.c_x = c_x
-        self.min_threshold = min_threshold
-        self.max_history = max_history
-        self.freeze_dataset_size = freeze_dataset_size
-        self.min_history = min_history
-        self.uncertainty_history = []
-        self.frozen = False
-
-    def update(self, current_uncertainty, current_dataset_size):
-        if np.isfinite(current_uncertainty) and current_uncertainty > 0:
-            self.uncertainty_history.append(float(current_uncertainty))
-
-        if current_dataset_size >= self.freeze_dataset_size and not self.frozen:
-            print(f"[THRESHOLD] Freezing threshold at {self.threshold:.4f} eV/A (dataset size: {current_dataset_size})")
-            self.frozen = True
-            return self.threshold
-
-        if not self.frozen and len(self.uncertainty_history) > self.min_history:
-            recent = self.uncertainty_history[-self.max_history:]
-            avg_u = float(np.mean(recent))
-            calculated_thresh = avg_u * (1.0 + self.c_x)
-            self.threshold = max(calculated_thresh, self.min_threshold)
-
-        return self.threshold
-
-# Paths
+# ==============================================================================
+# Global Paths & Constants
+# ==============================================================================
 BASE_DIR = Path("/home/maria.crist/dft_mlip/sep_pax/al_5A_painn")
 GEOMETRIES_DIR = BASE_DIR / "geometries"
 CONTROL_IN = BASE_DIR / "control.in"
@@ -117,10 +93,153 @@ C_X_RATIO = 0.25
 TRIGGER_COOLDOWN_STEPS = 100
 VALID_RATIO = 0.1
 MAX_AL_CYCLES = 50
-DESIRED_ACC_FORCE_MAE = None  # Match aimsprobe.yaml (desired_acc=0.0): run full 10k steps unless max_train_set_size is reached
+DESIRED_ACC_FORCE_MAE = None  # None: run full 10k steps unless max_train_set_size is reached
 
 
-class PainnActiveLearningManager5A:
+# ==============================================================================
+# Adaptive Threshold Engine
+# ==============================================================================
+class AimsPaxThresholdManager:
+    """
+    Rolling-window adaptive threshold engine following aims-PAX uncertainty protocol.
+    Dynamically adjusts the threshold as model uncertainty evolves with margin and floor.
+    """
+    def __init__(self, initial_threshold=2.50, c_x=0.25, min_threshold=1.80, max_history=400, freeze_dataset_size=540, min_history=10):
+        self.initial_threshold = initial_threshold
+        self.threshold = initial_threshold
+        self.c_x = c_x
+        self.min_threshold = min_threshold
+        self.max_history = max_history
+        self.freeze_dataset_size = freeze_dataset_size
+        self.min_history = min_history
+        self.uncertainty_history = []
+        self.frozen = False
+
+    def update(self, current_uncertainty, current_dataset_size):
+        if np.isfinite(current_uncertainty) and current_uncertainty > 0:
+            self.uncertainty_history.append(float(current_uncertainty))
+
+        if current_dataset_size >= self.freeze_dataset_size and not self.frozen:
+            print(f"[THRESHOLD] Freezing threshold at {self.threshold:.4f} eV/A (dataset size: {current_dataset_size})")
+            self.frozen = True
+            return self.threshold
+
+        if not self.frozen and len(self.uncertainty_history) > self.min_history:
+            recent = self.uncertainty_history[-self.max_history:]
+            avg_u = float(np.mean(recent))
+            calculated_thresh = avg_u * (1.0 + self.c_x)
+            self.threshold = max(calculated_thresh, self.min_threshold)
+
+        return self.threshold
+
+
+# ==============================================================================
+# Parsl Initialization & Python App
+# ==============================================================================
+def initialize_parsl(calc_dir: Path, max_workers: int = 1):
+    """Initializes Parsl with a local ThreadPoolExecutor."""
+    parsl_info_dir = calc_dir / "parsl_info"
+    parsl_info_dir.mkdir(parents=True, exist_ok=True)
+    config = Config(
+        executors=[
+            ThreadPoolExecutor(
+                label="dft_pool",
+                max_threads=max_workers,
+            )
+        ],
+        run_dir=str(parsl_info_dir / "run_dir"),
+        initialize_logging=False,
+        retries=0,
+    )
+    try:
+        parsl.load(config)
+        print(f"[PARSL] Initialized Parsl ThreadPoolExecutor (max_workers={max_workers}).")
+    except Exception as e:
+        print(f"[PARSL] Parsl DFK already loaded or re-used: {e}")
+
+
+@python_app(executors=["dft_pool"])
+def run_aims_parsl_task(
+    atoms_dict: dict,
+    dft_root_dir: str,
+    step: int,
+    traj_idx: int,
+    control_in_path: str,
+    species_dir: str,
+    aims_bin: str,
+    n_cores: int = 32,
+):
+    """
+    Parsl application that executes an FHI-aims single-point DFT calculation.
+    Runs asynchronously in the Parsl background worker thread.
+    """
+    import os
+    import sys
+    from pathlib import Path
+    import numpy as np
+    from ase import Atoms
+    from dft_interface import run_aims_single_point, AimsCalculationError
+
+    atoms = Atoms(
+        positions=atoms_dict["positions"],
+        numbers=atoms_dict["numbers"],
+        cell=atoms_dict["cell"],
+        pbc=atoms_dict["pbc"],
+    )
+    if "velocities" in atoms_dict and atoms_dict["velocities"] is not None:
+        atoms.set_velocities(atoms_dict["velocities"])
+
+    calc_dir = Path(dft_root_dir) / f"step_{step:06d}_traj_{traj_idx}"
+
+    try:
+        e_dft, f_dft, c_dir, hirshfeld_charges, free_vols = run_aims_single_point(
+            atoms=atoms,
+            dft_root_dir=dft_root_dir,
+            step=step,
+            traj_idx=traj_idx,
+            control_in_path=control_in_path,
+            species_dir=species_dir,
+            aims_bin=aims_bin,
+            n_cores=n_cores,
+        )
+        return {
+            "success": True,
+            "e_dft": float(e_dft),
+            "f_dft": f_dft.tolist(),
+            "calc_dir": str(c_dir),
+            "hirshfeld_charges": hirshfeld_charges.tolist() if hirshfeld_charges is not None else None,
+            "free_volumes": free_vols.tolist() if free_vols is not None else None,
+            "error": "",
+            "log_snippet": "",
+        }
+    except AimsCalculationError as err:
+        return {
+            "success": False,
+            "e_dft": None,
+            "f_dft": None,
+            "calc_dir": str(err.calc_dir),
+            "hirshfeld_charges": None,
+            "free_volumes": None,
+            "error": str(err),
+            "log_snippet": err.log_snippet,
+        }
+    except Exception as err:
+        return {
+            "success": False,
+            "e_dft": None,
+            "f_dft": None,
+            "calc_dir": str(calc_dir),
+            "hirshfeld_charges": None,
+            "free_volumes": None,
+            "error": str(err),
+            "log_snippet": "",
+        }
+
+
+# ==============================================================================
+# Main Parsl Active Learning Manager
+# ==============================================================================
+class PainnActiveLearningManager5AParsl:
     def __init__(self):
         self.base_dir = BASE_DIR
         self.dft_dir = self.base_dir / "dft_calculations"
@@ -146,12 +265,9 @@ class PainnActiveLearningManager5A:
         self.step = 0
         self.train_points_added = 0
         self.val_points_added = 0
-        self.active_traj_idx = 0
         self.accuracy_reached = False
-        self.last_checkpoints = {}
-        self.last_safe_checkpoints = {}
-        self.cooldown_counters = {}
-        self.consecutive_failures = {}
+
+        initialize_parsl(calc_dir=self.base_dir, max_workers=1)
 
         self.setup_signal_handlers()
         self.initialize_dataset()
@@ -175,10 +291,10 @@ class PainnActiveLearningManager5A:
             print(f"[AL-Manager] Initializing val.xyz from {INITIAL_VAL_DATASET}...")
             shutil.copyfile(INITIAL_VAL_DATASET, self.val_dataset_file)
         frames = read(str(self.dataset_file), index=":")
-        print(f"[AL-Manager] Active learning dataset contains {len(frames)} frames.")
+        self.dataset_size = len(frames)
+        print(f"[AL-Manager] Active learning dataset contains {self.dataset_size} frames.")
 
     def setup_models(self):
-        # Check if resuming from checkpoint to load latest model weights
         saved_dirs = None
         if self.state_file.exists():
             try:
@@ -209,9 +325,13 @@ class PainnActiveLearningManager5A:
             cutoff=6.0,
             device=self.device,
         )
-        # Persistent Adam optimizers
         self.optimizers = {
             i: torch.optim.Adam(filter(lambda p: p.requires_grad, m.parameters()), lr=1e-4)
+            for i, m in enumerate(self.calc.models)
+        }
+        from torch_ema import ExponentialMovingAverage
+        self.emas = {
+            i: ExponentialMovingAverage(m.parameters(), decay=0.99)
             for i, m in enumerate(self.calc.models)
         }
 
@@ -224,7 +344,7 @@ class PainnActiveLearningManager5A:
             atoms.calc = self.calc
             print(f"  [{i}] {g_file.name} ({len(atoms)} atoms)")
 
-            # Check initial forces to prevent explosive thermal shocks (e.g. Beta-cristobalite)
+            # Check initial forces to prevent explosive thermal shocks
             try:
                 init_forces = atoms.get_forces()
                 max_f = float(np.max(np.abs(init_forces)))
@@ -242,22 +362,26 @@ class PainnActiveLearningManager5A:
                 "name": g_file.stem,
                 "atoms": atoms,
                 "step": 0,
+                "status": "running",
+                "future": None,
+                "pending_point": None,
+                "cooldown": 0,
+                "consecutive_failures": 0,
+                "last_safe_checkpoint": {
+                    "positions": atoms.get_positions().copy(),
+                    "velocities": np.zeros_like(atoms.get_positions()),
+                    "step": 0,
+                },
                 "d1_path": self.traj_dir / f"traj_{g_file.stem}.lammpstrj",
                 "d2_path": self.traj_dir / f"traj_stress_{g_file.stem}.lammpstrj",
             })
-            self.cooldown_counters[i] = 0
-            self.consecutive_failures[i] = 0
-            self.last_safe_checkpoints[i] = {
-                "positions": atoms.get_positions().copy(),
-                "velocities": np.zeros_like(atoms.get_positions()),
-                "step": 0,
-            }
 
     def save_checkpoint(self):
         traj_states = []
         for t in self.trajectories:
             traj_states.append({
                 "step": t["step"],
+                "status": t["status"],
                 "positions": t["atoms"].get_positions().tolist(),
                 "velocities": t["atoms"].get_velocities().tolist(),
             })
@@ -267,7 +391,6 @@ class PainnActiveLearningManager5A:
             "step": self.step,
             "train_points_added": self.train_points_added,
             "val_points_added": self.val_points_added,
-            "active_traj_idx": self.active_traj_idx,
             "u_thresh": self.u_thresh,
             "uncertainty_history": self.threshold_mgr.uncertainty_history,
             "threshold_frozen": self.threshold_mgr.frozen,
@@ -294,38 +417,42 @@ class PainnActiveLearningManager5A:
         self.step = state.get("step", 0)
         self.train_points_added = state.get("train_points_added", 0)
         self.val_points_added = state.get("val_points_added", 0)
-        self.active_traj_idx = state.get("active_traj_idx", 0)
         self.u_thresh = max(state.get("u_thresh", INITIAL_U_THRESH), MIN_U_THRESH)
         self.threshold_mgr.threshold = self.u_thresh
         self.threshold_mgr.uncertainty_history = state.get("uncertainty_history", [])
         self.threshold_mgr.frozen = state.get("threshold_frozen", False)
 
-
         for i, t_state in enumerate(state.get("trajectories", [])):
             if i < len(self.trajectories):
                 pos = np.array(t_state["positions"])
                 vel = np.array(t_state["velocities"])
-                # Guard against corrupted / NaN trajectory state in checkpoint
+                t = self.trajectories[i]
                 if not np.isfinite(pos).all() or not np.isfinite(vel).all():
-                    print(f"[AL-Manager] WARNING: Found NaN in checkpoint for trajectory {i} ({self.trajectories[i]['name']})! Resetting to fresh initial geometry at {TEMPERATURE_K} K.")
+                    print(f"[AL-Manager] WARNING: Found NaN in checkpoint for trajectory {i} ({t['name']})! Resetting to fresh initial geometry at {TEMPERATURE_K} K.")
                     init_atoms = read(str(self.geometry_files[i]), format="aims")
-                    self.trajectories[i]["atoms"].set_positions(init_atoms.get_positions())
-                    MaxwellBoltzmannDistribution(self.trajectories[i]["atoms"], temperature_K=TEMPERATURE_K, rng=np.random.RandomState(42 + i))
-                    Stationary(self.trajectories[i]["atoms"])
-                    self.trajectories[i]["step"] = 0
+                    t["atoms"].set_positions(init_atoms.get_positions())
+                    MaxwellBoltzmannDistribution(t["atoms"], temperature_K=TEMPERATURE_K, rng=np.random.RandomState(42 + i))
+                    Stationary(t["atoms"])
+                    t["step"] = 0
                 else:
-                    self.trajectories[i]["step"] = t_state["step"]
-                    self.trajectories[i]["atoms"].set_positions(pos)
-                    self.trajectories[i]["atoms"].set_velocities(vel)
-                self.trajectories[i]["atoms"].calc = self.calc
-                self.last_safe_checkpoints[i] = {
-                    "positions": self.trajectories[i]["atoms"].get_positions().copy(),
-                    "velocities": self.trajectories[i]["atoms"].get_velocities().copy(),
-                    "step": self.trajectories[i]["step"],
+                    t["step"] = t_state["step"]
+                    t["atoms"].set_positions(pos)
+                    t["atoms"].set_velocities(vel)
+                t["atoms"].calc = self.calc
+                t["last_safe_checkpoint"] = {
+                    "positions": t["atoms"].get_positions().copy(),
+                    "velocities": t["atoms"].get_velocities().copy(),
+                    "step": t["step"],
                 }
+                # Reset status to running so Parsl dispatches fresh calculations if needed
+                t["status"] = "running"
+                t["future"] = None
+                t["pending_point"] = None
 
-    def handle_uncertainty_trigger(self, traj_idx: int, atoms: Atoms, u_value: float, atom_std: np.ndarray = None):
-        self.cycle += 1
+    def dispatch_parsl_trigger(self, traj_idx: int, atoms: Atoms, u_value: float, res: dict):
+        """Submits an FHI-aims single-point calculation to the background Parsl pool."""
+        t = self.trajectories[traj_idx]
+        atom_std = res.get("std_per_atom", None)
         trigger_info = ""
         if atom_std is not None:
             max_idx = int(np.argmax(atom_std))
@@ -334,79 +461,107 @@ class PainnActiveLearningManager5A:
             trigger_info = f" | Trigger Atom: #{max_idx} ({elem}) at z={z_pos:.2f} Å"
 
         print("\n" + "=" * 80)
-        print(f">>> [TRIGGER] Cycle {self.cycle} | Trajectory {traj_idx} ({self.trajectories[traj_idx]['name']})")
+        print(f">>> [PARSL ASYNC TRIGGER] Trajectory {traj_idx} ({t['name']}) at step {t['step']}")
         print(f">>> Uncertainty: {u_value:.4f} eV/A > Threshold: {self.u_thresh:.4f} eV/A{trigger_info}")
-        print("=" * 80)
+        print(f">>> Dispatched FHI-aims to Parsl background pool. Other trajectories continue running MD!")
+        print("=" * 80 + "\n")
 
-        # 1. Run FHI-aims single point (32 cores) with failure capture
-        try:
-            e_dft, f_dft, calc_dir, *_ = run_aims_single_point(
-                atoms=atoms,
-                dft_root_dir=self.dft_dir,
-                step=self.step,
-                traj_idx=traj_idx,
-                control_in_path=CONTROL_IN,
-                species_dir=SPECIES_DIR,
-                aims_bin=AIMS_BIN,
-                n_cores=32,
-            )
-        except AimsCalculationError as err:
-            self.cycle -= 1
+        t["status"] = "waiting"
+        t["pending_point"] = {
+            "atoms": atoms.copy(),
+            "u": u_value,
+            "atom_std": atom_std,
+            "step": t["step"],
+        }
+
+        atoms_dict = {
+            "positions": atoms.get_positions().tolist(),
+            "numbers": atoms.get_atomic_numbers().tolist(),
+            "cell": atoms.get_cell().tolist(),
+            "pbc": atoms.get_pbc().tolist(),
+            "velocities": atoms.get_velocities().tolist() if atoms.get_velocities() is not None else None,
+        }
+
+        t["future"] = run_aims_parsl_task(
+            atoms_dict=atoms_dict,
+            dft_root_dir=str(self.dft_dir),
+            step=t["step"],
+            traj_idx=traj_idx,
+            control_in_path=str(CONTROL_IN),
+            species_dir=str(SPECIES_DIR),
+            aims_bin=AIMS_BIN,
+            n_cores=32,
+        )
+
+    def handle_completed_dft(self, traj_idx: int, result: dict, pending: dict):
+        """Processes a completed Parsl DFT calculation, fine-tunes models, and resumes."""
+        t = self.trajectories[traj_idx]
+        atoms = pending["atoms"]
+        u_value = pending["u"]
+        atom_std = pending["atom_std"]
+        step = pending["step"]
+
+        if not result["success"]:
             print("\n" + "!" * 80)
-            print(f">>> [CALCULATION FAILED] FHI-aims failed on Trajectory {traj_idx} ({self.trajectories[traj_idx]['name']}) at step {self.step}!")
+            print(f">>> [CALCULATION FAILED] FHI-aims failed on Trajectory {traj_idx} ({t['name']}) at step {step}!")
             print(f">>> Preserving failed calculation in '{self.failed_dir.name}/' for investigation.")
             print("!" * 80 + "\n")
 
-            failed_target = self.failed_dir / f"step_{self.step:06d}_traj_{traj_idx}_{self.trajectories[traj_idx]['name']}"
-            if err.calc_dir.exists():
+            calc_dir = Path(result["calc_dir"])
+            failed_target = self.failed_dir / f"step_{step:06d}_traj_{traj_idx}_{t['name']}"
+            if calc_dir.exists():
                 if failed_target.exists():
                     shutil.rmtree(failed_target)
-                shutil.move(str(err.calc_dir), str(failed_target))
+                shutil.move(str(calc_dir), str(failed_target))
 
             log_entry = (
                 f"\n{'=' * 80}\n"
                 f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"Trajectory: {traj_idx} ({self.trajectories[traj_idx]['name']}) | MD Step: {self.step}\n"
+                f"Trajectory: {traj_idx} ({t['name']}) | MD Step: {step}\n"
                 f"Uncertainty: {u_value:.4f} eV/A | Threshold: {self.u_thresh:.4f} eV/A\n"
                 f"Preserved Folder: {failed_target}\n"
-                f"Error Message: {err}\n"
+                f"Error Message: {result.get('error', 'Unknown')}\n"
                 f"--- aims.out Error Snippet ---\n"
-                f"{err.log_snippet}\n"
+                f"{result.get('log_snippet', '')}\n"
                 f"{'=' * 80}\n"
             )
             with open(self.failed_dir / "failed_calculations.log", "a") as f:
                 f.write(log_entry)
 
             # Rollback trajectory to last safe checkpoint and RE-THERMALIZE velocities
-            if traj_idx in self.last_safe_checkpoints:
-                safe_data = self.last_safe_checkpoints[traj_idx]
-                atoms.set_positions(safe_data["positions"].copy())
-                # Re-thermalize with fresh random seed so MD explores a different non-divergent path
-                seed = int(time.time() * 1000) % 100000 + traj_idx
-                MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, rng=np.random.RandomState(seed))
-                Stationary(atoms)
-                atoms.calc = self.calc
-                self.trajectories[traj_idx]["step"] = safe_data["step"]
-                self.consecutive_failures[traj_idx] = self.consecutive_failures.get(traj_idx, 0) + 1
-                self.cooldown_counters[traj_idx] = TRIGGER_COOLDOWN_STEPS
+            safe_data = t["last_safe_checkpoint"]
+            t["atoms"].set_positions(safe_data["positions"].copy())
+            seed = int(time.time() * 1000) % 100000 + traj_idx
+            MaxwellBoltzmannDistribution(t["atoms"], temperature_K=TEMPERATURE_K, rng=np.random.RandomState(seed))
+            Stationary(t["atoms"])
+            t["atoms"].calc = self.calc
+            t["step"] = safe_data["step"]
+            t["consecutive_failures"] += 1
+            t["cooldown"] = TRIGGER_COOLDOWN_STEPS
 
-                # If repeated failures occur at this region, apply small perturbation (0.02 A) to escape basin
-                if self.consecutive_failures[traj_idx] >= 2:
-                    print(f"[AL-Manager] Multiple DFT failures ({self.consecutive_failures[traj_idx]}) on {self.trajectories[traj_idx]['name']}. Applying subtle thermal displacement (0.02 A) to escape basin...")
-                    noise = np.random.normal(0.0, 0.02, size=atoms.get_positions().shape)
-                    atoms.set_positions(atoms.get_positions() + noise)
+            if t["consecutive_failures"] >= 2:
+                print(f"[AL-Manager] Multiple DFT failures ({t['consecutive_failures']}) on {t['name']}. Applying subtle thermal displacement (0.02 A) to escape basin...")
+                noise = np.random.normal(0.0, 0.02, size=t["atoms"].get_positions().shape)
+                t["atoms"].set_positions(t["atoms"].get_positions() + noise)
 
-                print(f"[AL-Manager] Rolled back {self.trajectories[traj_idx]['name']} to safe step {safe_data['step']} with re-thermalized velocities.")
-            return False
+            print(f"[AL-Manager] Rolled back {t['name']} to safe step {safe_data['step']} with re-thermalized velocities.")
+            return
 
-        # 2. Append labeled frame to dataset (with 10% validation quota per aims-PAX)
-        self.consecutive_failures[traj_idx] = 0
-        self.last_safe_checkpoints[traj_idx] = {
+        # Success case
+        self.cycle += 1
+        e_dft = result["e_dft"]
+        f_dft = np.array(result["f_dft"])
+        calc_dir = Path(result["calc_dir"])
+        print(f"\n[DFT] Reference calculation finished successfully: {calc_dir}")
+        print(f"[DFT] Energy: {e_dft:.4f} eV | Max Force: {np.max(np.abs(f_dft)):.4f} eV/A")
+
+        t["consecutive_failures"] = 0
+        t["last_safe_checkpoint"] = {
             "positions": atoms.get_positions().copy(),
             "velocities": atoms.get_velocities().copy(),
-            "step": self.trajectories[traj_idx]["step"],
+            "step": step,
         }
-        self.cooldown_counters[traj_idx] = TRIGGER_COOLDOWN_STEPS
+        t["cooldown"] = TRIGGER_COOLDOWN_STEPS
 
         labeled_atoms = atoms.copy()
         labeled_atoms.info["REF_energy"] = e_dft
@@ -418,23 +573,34 @@ class PainnActiveLearningManager5A:
             labeled_atoms.info["trigger_element"] = atoms.get_chemical_symbols()[max_idx]
             labeled_atoms.info["trigger_z"] = float(atoms.get_positions()[max_idx, 2])
 
+        h_charges = result.get("hirshfeld_charges", None)
+        free_vols = result.get("free_volumes", None)
+        if h_charges is not None:
+            labeled_atoms.arrays["hirshfeld_charges"] = np.array(h_charges, dtype=np.float64)
+            q_arr = np.array(h_charges)
+            symbols = atoms.get_chemical_symbols()
+            q_str = []
+            for elem in sorted(set(symbols)):
+                elem_q = [q_arr[j] for j, s in enumerate(symbols) if s == elem]
+                q_str.append(f"{elem}: {np.mean(elem_q):+.3f} e (min: {np.min(elem_q):+.3f}, max: {np.max(elem_q):+.3f})")
+            print(f"[DFT HIRSHFELD] Mean Charges -> " + " | ".join(q_str))
+        if free_vols is not None:
+            labeled_atoms.arrays["free_volumes"] = np.array(free_vols, dtype=np.float64)
+
         total_points_added = self.train_points_added + self.val_points_added + 1
         if self.val_points_added < VALID_RATIO * total_points_added:
             write(str(self.val_dataset_file), labeled_atoms, format="extxyz", append=True)
             self.val_points_added += 1
             print(f"[AL-Manager] Added point to validation set (Total Val: {self.val_points_added}). Skipping retrain per aims-PAX quota.")
-            self.last_checkpoints[traj_idx] = (atoms.get_positions().copy(), atoms.get_velocities().copy())
             self.save_checkpoint()
-            return True
+            return
 
         write(str(self.dataset_file), labeled_atoms, format="extxyz", append=True)
         self.train_points_added += 1
+        self.dataset_size += 1
 
-        # Update last known safe checkpoint
-        self.last_checkpoints[traj_idx] = (atoms.get_positions().copy(), atoms.get_velocities().copy())
-
-        # 3. Retrain 3 PaiNN models (1 epoch) with persistent optimizers
-        print(f"[AL-Manager] Retraining 3 PaiNN models for 1 epoch (Cycle {self.cycle})...")
+        # Online fine-tuning: retrain 3 PaiNN committee members for 1 epoch with EMA smoothing
+        print(f"[AL-Manager] Retraining 3 PaiNN models for 1 epoch (Cycle {self.cycle}) with EMA weight smoothing (decay=0.99)...")
         updated_paths = retrain_ensemble(
             calculator=self.calc,
             dataset_path=self.dataset_file,
@@ -447,14 +613,16 @@ class PainnActiveLearningManager5A:
             device=self.device,
             val_dataset_path=self.val_dataset_file,
             optimizers=self.optimizers,
+            emas=self.emas,
+            ema_decay=0.99,
         )
         self.current_model_dirs = [Path(p) for p in updated_paths]
 
-        # 4. Ensure updated calculator is bound to all trajectories
-        for t in self.trajectories:
-            t["atoms"].calc = self.calc
+        # Bind updated calculator to all trajectory instances
+        for tr in self.trajectories:
+            tr["atoms"].calc = self.calc
 
-        # 5. Evaluate validation set & check desired_acc stopping criterion
+        # Validation error evaluation
         val_f_mae, val_e_mae = self.evaluate_validation()
         if val_f_mae is not None:
             print(f"[AL-Manager] Cycle {self.cycle} Validation -> Force MAE: {val_f_mae:.2f} meV/A | Energy MAE: {val_e_mae:.2f} meV/atom")
@@ -468,10 +636,6 @@ class PainnActiveLearningManager5A:
         self.save_checkpoint()
 
     def evaluate_validation(self):
-        """
-        Evaluates the committee on the held-out validation set to compute Force MAE (meV/A)
-        and Energy MAE (meV/atom).
-        """
         val_path = self.val_dataset_file if self.val_dataset_file.exists() else INITIAL_VAL_DATASET
         if not val_path.exists():
             return None, None
@@ -497,12 +661,12 @@ class PainnActiveLearningManager5A:
             atoms.calc = self.calc
             self.calc.calculate(atoms)
             f_pred = self.calc.results["forces"]
-            f_mae = np.mean(np.abs(f_pred - f_ref)) * 1000.0  # meV/A
+            f_mae = np.mean(np.abs(f_pred - f_ref)) * 1000.0
             f_maes.append(f_mae)
 
             if e_ref is not None:
                 e_pred = self.calc.results["energy"]
-                e_mae = abs(e_pred - e_ref) / len(atoms) * 1000.0  # meV/atom
+                e_mae = abs(e_pred - e_ref) / len(atoms) * 1000.0
                 e_maes.append(e_mae)
 
         mean_f_mae = float(np.mean(f_maes)) if f_maes else None
@@ -511,7 +675,7 @@ class PainnActiveLearningManager5A:
 
     def run(self):
         print("\n==========================================================")
-        print(f"STARTING PAINN ACTIVE LEARNING RUN ON 5 A GEOMETRIES")
+        print(f"STARTING PAINN PARSL ASYNCHRONOUS AL RUN ON 5 A GEOMETRIES")
         print(f"Max steps: {MAX_MD_STEPS} | T: {TEMPERATURE_K} K | Device: {self.device}")
         if DESIRED_ACC_FORCE_MAE is not None:
             print(f"Desired accuracy limit: {DESIRED_ACC_FORCE_MAE:.2f} meV/A Force MAE")
@@ -529,11 +693,37 @@ class PainnActiveLearningManager5A:
             dyn_drivers.append(dyn)
 
         while any(t["step"] < MAX_MD_STEPS for t in self.trajectories) and self.cycle < MAX_AL_CYCLES and not self.accuracy_reached:
+            # ------------------------------------------------------------------
+            # Phase 1: Poll Parsl background futures for completed DFT calculations
+            # ------------------------------------------------------------------
             for i, t in enumerate(self.trajectories):
-                if t["step"] >= MAX_MD_STEPS:
+                if t["status"] == "waiting" and t["future"] is not None:
+                    if t["future"].done():
+                        res = t["future"].result()
+                        pending = t["pending_point"]
+                        t["status"] = "running"
+                        t["future"] = None
+                        t["pending_point"] = None
+                        self.handle_completed_dft(traj_idx=i, result=res, pending=pending)
+
+            if self.accuracy_reached:
+                break
+
+            # ------------------------------------------------------------------
+            # Phase 2: Check if all non-finished trajectories are currently waiting
+            # ------------------------------------------------------------------
+            unfinished = [t for t in self.trajectories if t["step"] < MAX_MD_STEPS]
+            if len(unfinished) > 0 and all(t["status"] == "waiting" for t in unfinished):
+                time.sleep(1.0)
+                continue
+
+            # ------------------------------------------------------------------
+            # Phase 3: Propagate running trajectories on GPU
+            # ------------------------------------------------------------------
+            for i, t in enumerate(self.trajectories):
+                if t["status"] != "running" or t["step"] >= MAX_MD_STEPS:
                     continue
 
-                self.active_traj_idx = i
                 dyn = dyn_drivers[i]
                 atoms = t["atoms"]
 
@@ -544,19 +734,19 @@ class PainnActiveLearningManager5A:
                 pos = atoms.get_positions()
                 vel = atoms.get_velocities()
 
-                # Guard 1: Detect NaN/Inf coordinates and recover immediately
+                # Guard 1: NaN/Inf detection
                 if not np.isfinite(pos).all() or not np.isfinite(vel).all():
                     print(f"\n[AL-Manager] WARNING: NaN/Inf coordinates detected in {t['name']} at step {t['step']}! Recovering from last safe checkpoint...")
-                    safe_data = self.last_safe_checkpoints[i]
+                    safe_data = t["last_safe_checkpoint"]
                     atoms.set_positions(safe_data["positions"].copy())
                     seed = int(time.time() * 1000) % 100000 + i
                     MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, rng=np.random.RandomState(seed))
                     Stationary(atoms)
                     t["step"] = safe_data["step"]
-                    self.cooldown_counters[i] = TRIGGER_COOLDOWN_STEPS
+                    t["cooldown"] = TRIGGER_COOLDOWN_STEPS
                     continue
 
-                # Guard 2: Detect thermal runaway (T > 1000 K) and re-thermalize
+                # Guard 2: Thermal runaway detection (T > 1000 K)
                 temp = atoms.get_temperature()
                 if temp > 1000.0:
                     print(f"\n[AL-Manager] WARNING: Thermal runaway detected in {t['name']} (T = {temp:.1f} K > 1000 K)! Re-thermalizing velocities to {TEMPERATURE_K} K...")
@@ -568,22 +758,21 @@ class PainnActiveLearningManager5A:
                 u = float(res.get("max_atomic_sd", 0.0))
 
                 # Update rolling adaptive threshold
-                ds_size = len(read(str(self.dataset_file), index=":"))
-                self.u_thresh = self.threshold_mgr.update(u, ds_size)
+                self.u_thresh = self.threshold_mgr.update(u, self.dataset_size)
 
                 # Update safe checkpoint if trajectory is healthy and stable
                 if temp < 550.0 and u < self.u_thresh * 0.85:
-                    self.last_safe_checkpoints[i] = {
+                    t["last_safe_checkpoint"] = {
                         "positions": pos.copy(),
                         "velocities": vel.copy(),
                         "step": t["step"],
                     }
 
                 # Decrement cooldown counter if active
-                if self.cooldown_counters[i] > 0:
-                    self.cooldown_counters[i] -= SKIP_STEP_MLFF
+                if t["cooldown"] > 0:
+                    t["cooldown"] -= SKIP_STEP_MLFF
 
-                # Dumps with dynamic molecule identification
+                # Periodic LAMMPS and stress dumps
                 if t["step"] % DUMP_EVERY_D1 == 0:
                     mol_ids = identify_molecules(atoms)
                     write_lammps_dump(t["d1_path"], step=t["step"], atoms=atoms, mol_ids=mol_ids, stress=None, append=True)
@@ -594,25 +783,26 @@ class PainnActiveLearningManager5A:
 
                 if t["step"] % 100 == 0:
                     thresh_str = f"{self.u_thresh:.4f} eV/A" if np.isfinite(self.u_thresh) else "inf"
-                    cd_str = f" | CD: {self.cooldown_counters[i]}" if self.cooldown_counters[i] > 0 else ""
+                    cd_str = f" | CD: {t['cooldown']}" if t["cooldown"] > 0 else ""
                     print(f"Step {t['step']:05d} | {t['name']} | T: {temp:.1f} K | U: {u:.4f} eV/A | Thresh: {thresh_str}{cd_str}")
 
-                # Trigger condition (checked only if cooldown is expired)
+                # Uncertainty trigger check
                 if u > self.u_thresh:
-                    if self.cooldown_counters[i] > 0:
+                    if t["cooldown"] > 0:
                         if t["step"] % 100 == 0:
-                            print(f"[COOLDOWN] Trajectory {i} ({t['name']}) U={u:.4f} > {self.u_thresh:.4f}, but in cooldown ({self.cooldown_counters[i]} steps left).")
+                            print(f"[COOLDOWN] Trajectory {i} ({t['name']}) U={u:.4f} > {self.u_thresh:.4f}, but in cooldown ({t['cooldown']} steps left).")
                     else:
-                        atom_std = res.get("std_per_atom", None)
-                        self.handle_uncertainty_trigger(traj_idx=i, atoms=atoms, u_value=u, atom_std=atom_std)
-                        if self.accuracy_reached:
-                            break
+                        self.dispatch_parsl_trigger(traj_idx=i, atoms=atoms, u_value=u, res=res)
 
-            if self.accuracy_reached:
-                break
-
+            # Checkpoint every 500 steps
             if self.step % 500 == 0:
                 self.save_checkpoint()
+
+        # Clean shutdown of Parsl
+        try:
+            parsl.dfk().cleanup()
+        except Exception:
+            pass
 
         print("\n==========================================================")
         if self.accuracy_reached:
@@ -636,5 +826,5 @@ class PainnActiveLearningManager5A:
 
 
 if __name__ == "__main__":
-    manager = PainnActiveLearningManager5A()
+    manager = PainnActiveLearningManager5AParsl()
     manager.run()

@@ -51,6 +51,36 @@ class AimsCalculationError(RuntimeError):
         self.log_snippet = log_snippet
 
 
+def parse_hirshfeld_data(out_file):
+    """
+    Parses Hirshfeld atomic charges and free atom volumes from aims.out.
+    """
+    import re
+    charges = []
+    free_vols = []
+    active = False
+    try:
+        with open(out_file, "r") as f:
+            for line in f:
+                if not active:
+                    if "Performing Hirshfeld analysis of fragment charges and moments" in line:
+                        active = True
+                else:
+                    if "Hirshfeld charge" in line:
+                        m = re.findall(r"[-+]?\d*\.\d+|\d+", line)
+                        if m:
+                            charges.append(float(m[0]))
+                    elif "Free atom volume" in line:
+                        m = re.findall(r"[-+]?\d*\.\d+|\d+", line)
+                        if m:
+                            free_vols.append(float(m[0]))
+        charges_arr = np.array(charges, dtype=np.float64) if charges else None
+        free_vols_arr = np.array(free_vols, dtype=np.float64) if free_vols else None
+        return charges_arr, free_vols_arr
+    except Exception:
+        return None, None
+
+
 def run_aims_single_point(
     atoms,
     dft_root_dir,
@@ -129,8 +159,11 @@ def run_aims_single_point(
             log_snippet=snippet,
         )
 
+    hirshfeld_charges, free_vols = parse_hirshfeld_data(out_file)
     max_f = float(np.max(np.abs(f_dft)))
     print(f"[DFT SUCCESS] Energy: {e_dft:.4f} eV | Max Force: {max_f:.4f} eV/A")
+    if hirshfeld_charges is not None:
+        print(f"[DFT HIRSHFELD] Parsed {len(hirshfeld_charges)} atomic charges (Net charge: {np.sum(hirshfeld_charges):+.4f} e)")
     print(f"[DFT SAVED] Calculation folder permanently preserved at: {calc_dir}\n")
 
-    return e_dft, f_dft, calc_dir
+    return e_dft, f_dft, calc_dir, hirshfeld_charges, free_vols

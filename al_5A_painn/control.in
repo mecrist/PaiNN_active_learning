@@ -12,6 +12,8 @@ override_kgrid_checks .true.
 
 # SCF convergence — stability knobs, can vary per system
 adjust_scf            always 3
+sc_iter_limit         160
+charge_mix_param      0.10
 sc_accuracy_rho       1E-3
 sc_accuracy_eev       1E-2
 sc_accuracy_etot      1E-5

@@ -126,6 +126,25 @@ def build_nff_dataset(atoms_list, ref_energies, cutoff=6.0):
     return ds
 
 
+from torch_ema import ExponentialMovingAverage
+
+
+class EMAHook(hooks.Hook):
+    """
+    Exponential Moving Average hook for NFF Trainer.
+    Updates smoothed parameters after each batch step, and copies the averaged
+    weights into the model at the end of training to stabilize potential energy surfaces.
+    """
+    def __init__(self, ema: ExponentialMovingAverage):
+        self.ema = ema
+
+    def on_batch_end(self, trainer, train_batch, result, loss):
+        self.ema.update()
+
+    def on_train_ends(self, trainer):
+        self.ema.copy_to(trainer._model.parameters())
+
+
 def retrain_ensemble(
     calculator,
     dataset_path,
@@ -138,6 +157,8 @@ def retrain_ensemble(
     device="cuda:0" if torch.cuda.is_available() else "cpu",
     val_dataset_path=None,
     optimizers=None,
+    emas=None,
+    ema_decay=0.99,
 ):
     """
     Retrains all models in the ensemble for n_epochs (default 1 epoch)
@@ -195,6 +216,13 @@ def retrain_ensemble(
         train_hooks = [
             hooks.MaxEpochHook(n_epochs),
         ]
+        if emas is not None:
+            if idx in emas:
+                ema = emas[idx]
+            else:
+                ema = ExponentialMovingAverage(model.parameters(), decay=ema_decay)
+                emas[idx] = ema
+            train_hooks.append(EMAHook(ema))
 
         trainer = Trainer(
             model_path=str(m_dir),

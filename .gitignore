@@ -10,6 +10,7 @@ venv/
 
 # Active Learning Runtime Outputs & Dynamic Data
 dft_calculations/
+failed_calculations/
 checkpoints/
 trajectories/
 parsl_info/
