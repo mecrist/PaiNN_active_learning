@@ -44,24 +44,30 @@ class ALConfiguration:
     geometry_files: List[Path] = field(default_factory=list)
 
     temperature_K: float = 300.0
-    timestep_fs: float = 1.0
-    friction: float = 0.01
+    timestep_fs: float = 0.5
+    friction: float = 0.002 / units.fs
     skip_step_mlff: int = 25
     max_md_steps: int = 10000
     trigger_cooldown_steps: int = 100
 
-    c_x: float = 0.5
-    min_threshold: float = 0.05
-    initial_threshold: float = 1.95
-    freeze_dataset_size: Optional[int] = None
-    desired_acc_force_mae: Optional[float] = 50.0  # in meV/A
+    c_x: float = 0.25
+    c_x_ratio: Optional[float] = None
+    min_threshold: float = 1.80
+    initial_threshold: float = 2.50
+    freeze_dataset_size: Optional[int] = 540
+    max_al_cycles: Optional[int] = 50
+    desired_acc_force_mae: Optional[float] = None  # in meV/A
 
     n_dft_cores: int = 32
-    valid_ratio: float = 0.15
+    valid_ratio: float = 0.1
     device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-    dump_every_d1: int = 25
-    dump_every_d2: int = 100
+    dump_every_d1: int = 1000
+    dump_every_d2: int = 5000
+
+    def __post_init__(self):
+        if self.c_x_ratio is not None:
+            self.c_x = self.c_x_ratio
 
 
 class ALStateManager:
@@ -74,6 +80,7 @@ class ALStateManager:
         self.step: int = 0
         self.train_points_added: int = 0
         self.val_points_added: int = 0
+        self.dataset_size: int = 0
         self.threshold_mgr = RollingAdaptiveThresholdManager(
             c_x=config.c_x,
             min_threshold=config.min_threshold,
@@ -223,9 +230,9 @@ class PrepareALProcedure:
         for d in [self.ckpt_dir, self.dft_dir, self.failed_dir, self.traj_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
-        self._initialize_datasets()
         self.ensemble = ALEnsemble(self.config, self.state_file)
         self.state_manager = ALStateManager(self.state_file, self.config)
+        self._initialize_datasets()
         self.trajectories = self._setup_trajectories()
         self.dyn_drivers = self._setup_md_drivers()
 
@@ -240,6 +247,7 @@ class PrepareALProcedure:
 
         frames = load_dataset(self.dataset_file)
         self.dataset_size = len(frames)
+        self.state_manager.dataset_size = self.dataset_size
         print(f"[PrepareALProcedure] Active learning dataset contains {self.dataset_size} frames.")
 
     def _setup_trajectories(self) -> List[Dict[str, Any]]:
@@ -299,8 +307,10 @@ class PrepareALProcedure:
         return drivers
 
     def check_al_done(self) -> bool:
-        """Check if active learning is done based on max steps or checkpoint status."""
+        """Check if active learning is done based on max steps, max cycles, or checkpoint status."""
         if self.state_manager.step >= self.config.max_md_steps:
+            return True
+        if self.config.max_al_cycles is not None and self.state_manager.cycle >= self.config.max_al_cycles:
             return True
         if self.state_file.exists():
             try:

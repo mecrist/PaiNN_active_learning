@@ -70,7 +70,7 @@ class ALRunningManager:
             temp = atoms.get_temperature()
 
             # Update adaptive threshold using in-memory dataset size counter
-            current_thresh = self.state_manager.threshold_mgr.update(u, self.state_manager.train_points_added)
+            current_thresh = self.state_manager.threshold_mgr.update(u, self.state_manager.dataset_size)
 
             # Update safe checkpoint if trajectory is healthy and stable
             if temp < 550.0 and u < current_thresh * 0.85:
@@ -158,7 +158,8 @@ class ALDataManager:
         else:
             save_labeled_point(self.dataset_file, labeled_atoms, append=True)
             self.state_manager.train_points_added += 1
-            print(f"[ALDataManager] Added point to training set (Total Train added: {self.state_manager.train_points_added}).")
+            self.state_manager.dataset_size += 1
+            print(f"[ALDataManager] Added point to training set (Total Train added: {self.state_manager.train_points_added}, Total dataset: {self.state_manager.dataset_size}).")
             return "training"
 
 

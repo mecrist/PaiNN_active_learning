@@ -134,6 +134,11 @@ class ALProcedurePARSL(PrepareALProcedure):
                 print("\n>>> Active Learning target accuracy reached! Halting loop.")
                 break
 
+            if self.config.max_al_cycles is not None and self.state_manager.cycle >= self.config.max_al_cycles:
+                print(f"\n>>> Max active learning cycles ({self.config.max_al_cycles}) reached! Halting loop.")
+                break
+
+
             # ------------------------------------------------------------------
             # Phase 2: Check if all unfinished trajectories are currently waiting
             # ------------------------------------------------------------------
