@@ -50,10 +50,10 @@ class ALConfiguration:
     max_md_steps: int = 10000
     trigger_cooldown_steps: int = 100
 
-    c_x: float = 0.25
+    c_x: float = 0.0
     c_x_ratio: Optional[float] = None
-    min_threshold: float = 1.80
-    initial_threshold: float = 2.50
+    min_threshold: float = 0.05
+    initial_threshold: float = float("inf")
     freeze_dataset_size: Optional[int] = 540
     max_al_cycles: Optional[int] = 50
     desired_acc_force_mae: Optional[float] = None  # in meV/A
@@ -84,7 +84,7 @@ class ALStateManager:
         self.threshold_mgr = RollingAdaptiveThresholdManager(
             c_x=config.c_x,
             min_threshold=config.min_threshold,
-            rolling_window=100,
+            rolling_window=400,
             freeze_size=config.freeze_dataset_size,
             initial_threshold=config.initial_threshold,
         )

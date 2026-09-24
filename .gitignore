@@ -23,6 +23,8 @@ al_5A_mace/restart/
 al_5A_mace/results/
 al_5A_mace/model/*.pth
 al_5A_painn/val.xyz
+al_5A_painn/archive_*/
+archive_*/
 
 # HPC / Slurm Log Files
 *.out

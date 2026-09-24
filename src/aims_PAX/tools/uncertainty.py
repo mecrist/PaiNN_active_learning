@@ -67,18 +67,20 @@ class RollingAdaptiveThresholdManager:
 
     def __init__(
         self,
-        c_x: float = 0.5,
+        c_x: float = 0.0,
         min_threshold: float = 0.05,
-        rolling_window: int = 100,
-        freeze_size: Optional[int] = None,
-        initial_threshold: Optional[float] = None,
+        rolling_window: int = 400,
+        freeze_size: Optional[int] = 540,
+        initial_threshold: Optional[float] = float("inf"),
+        min_history: int = 10,
     ):
         self.c_x = c_x
         self.min_threshold = min_threshold
         self.rolling_window = rolling_window
         self.freeze_size = freeze_size
+        self.min_history = min_history
         self.uncertainty_history: List[float] = []
-        self.threshold = initial_threshold if initial_threshold is not None else min_threshold
+        self.threshold = initial_threshold if initial_threshold is not None else float("inf")
         self.frozen = False
 
     def update(self, u_value: float, current_dataset_size: Optional[int] = None) -> float:
@@ -92,7 +94,7 @@ class RollingAdaptiveThresholdManager:
             if current_dataset_size >= self.freeze_size:
                 self.frozen = True
 
-        if not self.frozen and len(self.uncertainty_history) > 0:
+        if not self.frozen and len(self.uncertainty_history) >= self.min_history:
             avg_u = float(np.mean(self.uncertainty_history))
             calculated_thresh = avg_u * (1.0 + self.c_x)
             self.threshold = max(calculated_thresh, self.min_threshold)
