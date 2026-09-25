@@ -1,5 +1,5 @@
 ==================================================================================================================================
-PRE-ACTIVE LEARNING BASELINE PERFORMANCE SUMMARY: MACE vs. PAINN (OUR DATASET)
+PRE-ACTIVE LEARNING BASELINE PERFORMANCE SUMMARY: MACE vs. PAINN
 ==================================================================================================================================
 Source Dataset: /home/maria.crist/dft_mlip/my_dataset/mine
 Test Set Size: 70 structures (silica-water interfaces)
@@ -11,13 +11,9 @@ MACE         | model_0 (run-777)         | 85       | 26.30            | N/A    
 MACE         | model_1 (seed 42)         | 74       | 25.50            | N/A             | 315.20           | N/A             | 40.02%      
 MACE         | model_2 (seed 123)        | 74       | 34.40            | N/A             | 316.90           | N/A             | 40.25%      
 MACE         | Ensemble Mean (500 ep)    | avg      | 28.73            | N/A             | 316.57           | N/A             | 40.20%      
-MACE         | model_0 (ep100)           | 77       | 32.00            | N/A             | 315.60           | N/A             | N/A         
-MACE         | model_0 (ep1000)          | 80       | 31.30            | N/A             | 313.80           | N/A             | N/A         
 ----------------------------------------------------------------------------------------------------------------------------------
 PaiNN        | model_0 (ep500)           | 263      | 2.63             | 1.76            | 313.08           | 186.04          | N/A         
 PaiNN        | model_1 (ep500)           | 255      | 2.83             | 1.80            | 317.65           | 186.78          | N/A         
 PaiNN        | model_2 (ep500)           | 277      | 2.67             | 1.77            | 323.87           | 196.55          | N/A         
 PaiNN        | Ensemble Mean (500 ep)    | avg      | 2.71             | 1.78            | 318.20           | 189.79          | N/A         
-PaiNN        | Ensemble Mean (100 ep)    | avg      | 3.54             | 2.51            | 324.68           | 194.46          | N/A         
-PaiNN        | Ensemble Mean (1000 ep)   | avg      | 2.93             | 1.95            | 312.17           | 185.67          | N/A         
 ==================================================================================================================================
