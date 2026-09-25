@@ -301,7 +301,6 @@ def run_final_convergence(
         train_hooks = [
             hooks.MaxEpochHook(n_epochs),
             EMAHook(ema),
-            hooks.PrintingHook(interval=5),
         ]
 
         trainer = Trainer(
@@ -317,5 +316,9 @@ def run_final_convergence(
         trainer.grad_is_nan = types.MethodType(grad_is_finite, trainer)
         print(f"  --> Converging Model {idx} ({n_epochs} epochs)...")
         trainer.train(device=torch.device(device), n_epochs=n_epochs)
+
+        best_path = m_dir / "best_model"
+        if not best_path.exists():
+            torch.save(model, str(best_path))
 
     print("[FINAL CONVERGENCE] Complete. Converged models saved to:", out_dir)
