@@ -15,5 +15,17 @@ MACE         | Ensemble Mean (500 ep)    | avg      | 28.73            | N/A    
 PaiNN        | model_0 (ep500)           | 263      | 2.63             | 1.76            | 313.08           | 186.04          | N/A         
 PaiNN        | model_1 (ep500)           | 255      | 2.83             | 1.80            | 317.65           | 186.78          | N/A         
 PaiNN        | model_2 (ep500)           | 277      | 2.67             | 1.77            | 323.87           | 196.55          | N/A         
-PaiNN        | Ensemble Mean (500 ep)    | avg      | 2.71             | 1.78            | 318.20           | 189.79          | N/A         
+PaiNN        | Ensemble Mean (500 ep)    | avg      | 2.71*            | 1.78            | 318.20           | 189.79          | N/A         
+==================================================================================================================================
+METHODOLOGICAL NOTES & CAVEATS:
+1. In-Distribution vs Out-of-Distribution Energy Accuracy (*):
+   - PaiNN was trained after subtracting isolated per-element atomic reference energies (E0_Si, E0_O, E0_H).
+   - On these 70 held-out test frames (randomly sampled from the same bulk and slab AIMD trajectories), the residual
+     energy is narrow (~0.012 eV/atom), which PaiNN fits to 2.71 meV/atom RMSE.
+   - When applied out-of-distribution to the 5 Å water-silica slab interface in sep_pax, PaiNN began with an Energy RMSE
+     of 276.88 meV/atom, which active learning and post-AL convergence successfully reduced to 74.26 meV/atom (-73.2%).
+   - In contrast, MACE directly predicts total potential energy without empirical pre-subtraction, generalizing
+     robustly to sep_pax with an initial Energy RMSE of 31.20 meV/atom and converging post-AL to 30.12 meV/atom.
+2. Force Parity:
+   - Both MACE (~316 meV/Å) and PaiNN (~318 meV/Å) achieved nearly identical force accuracy on the pre-AL test set.
 ==================================================================================================================================

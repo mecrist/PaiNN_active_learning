@@ -1,6 +1,6 @@
 ARCHITECTURE:
   MLP_irreps: 16x0e
-  avg_num_neighbors: 25.676847873137874
+  avg_num_neighbors: 25.67735464594529
   compute_avg_num_neighbors: true
   correlation: 3
   gate: silu

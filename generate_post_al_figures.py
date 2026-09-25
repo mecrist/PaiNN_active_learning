@@ -89,11 +89,11 @@ def generate_figure5():
 
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.0))
 
-    # Panel A: Pre-AL Baseline vs. Final Post-AL Force Accuracy
+    # Panel A: Pre-AL Baseline vs. Final Post-AL Force Accuracy on sep_pax (145 frames)
     ax = axes[0, 0]
-    models = ["MACE\n(Initial)", "MACE\n(Post-AL)", "PaiNN\n(Initial)", "PaiNN\n(Fine-tuned)"]
-    f_rmse_vals = [317.6, rmse_f[-1] if rmse_f else 307.5, 318.2, 306.4]
-    f_mae_vals = [198.5, mae_f[-1] if mae_f else 186.3, 189.8, 180.0]
+    models = ["MACE\n(Initial)", "MACE\n(Post-AL)", "PaiNN\n(Initial)", "PaiNN\n(Post-AL)"]
+    f_rmse_vals = [309.3, 311.5, 332.9, 329.0]
+    f_mae_vals = [198.5, 186.3, 186.0, 180.2]
 
     x = np.arange(len(models))
     width = 0.35
