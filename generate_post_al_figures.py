@@ -195,13 +195,11 @@ def generate_figure5():
 
     plt.tight_layout()
     out_png = FIG_DIR / "fig5_post_al_accuracy_and_outliers.png"
-    out_pdf = FIG_DIR / "fig5_post_al_accuracy_and_outliers.pdf"
     plt.savefig(out_png)
-    plt.savefig(out_pdf)
     plt.close()
 
-    shutil.copyfile(out_png, ARTIFACTS_DIR / out_png.name)
-    shutil.copyfile(out_pdf, ARTIFACTS_DIR / out_pdf.name)
+    if ARTIFACTS_DIR.exists():
+        shutil.copyfile(out_png, ARTIFACTS_DIR / out_png.name)
     print(f"[Figure 5] Saved: {out_png}")
 
 
@@ -313,13 +311,11 @@ def generate_figure6():
 
     plt.tight_layout()
     out_png = FIG_DIR / "fig6_interface_spatial_uncertainty_and_triggers.png"
-    out_pdf = FIG_DIR / "fig6_interface_spatial_uncertainty_and_triggers.pdf"
     plt.savefig(out_png)
-    plt.savefig(out_pdf)
     plt.close()
 
-    shutil.copyfile(out_png, ARTIFACTS_DIR / out_png.name)
-    shutil.copyfile(out_pdf, ARTIFACTS_DIR / out_pdf.name)
+    if ARTIFACTS_DIR.exists():
+        shutil.copyfile(out_png, ARTIFACTS_DIR / out_png.name)
     print(f"[Figure 6] Saved: {out_png}")
 
 

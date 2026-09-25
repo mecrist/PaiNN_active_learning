@@ -1,1 +1,0 @@
-/home/maria.crist/dft_mlip/sep_pax/painn_ensemble_calc.py

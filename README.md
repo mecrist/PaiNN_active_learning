@@ -63,33 +63,41 @@ where:
 
 ## 📂 Repository Architecture
 
+The source code follows the three-layer architectural separation of **aims-PAX** (`src/aims_PAX/`):
+
 ```text
-├── al_5A_painn/                     # 3-System (5 A gap) Closed-Loop PaiNN AL Pipeline
-│   ├── run_painn_al_5A.py           # Dedicated 5 A active learning orchestrator
-│   ├── run_painn_al_5A.slurm        # Slurm launch script (1 GPU + 32 CPU cores, etileno)
-│   ├── geometries/                  # 5 A silica-water interface geometries (.in)
-│   └── control.in                   # FHI-aims electronic structure parameters
+├── src/aims_PAX/                    # Modular 3-layer architecture package
+│   ├── procedures/                  # High-level workflow orchestration
+│   │   ├── preparation.py           # ALConfiguration, ALStateManager, ALEnsemble, ALMD
+│   │   ├── active_learning.py       # ALProcedurePARSL (Closed-loop asynchronous active learning)
+│   │   └── al_managers.py           # Decoupled managers (RunManager, DataManager, TrainManager)
+│   └── tools/                       # Model interfaces & scientific utilities
+│       ├── model_tools/
+│       │   ├── painn_calculator.py  # PaiNN committee ASE calculator & uncertainty engine
+│       │   ├── train_painn.py       # 1-epoch online fine-tuning (EMA) & 50-epoch post-AL convergence
+│       │   └── mace_calculator.py   # MACE committee calculator wrapper
+│       ├── uncertainty.py           # MolForceUncertainty & RollingAdaptiveThresholdManager
+│       └── utilities/               # Trajectory dumps, MPI/Parsl runners, data I/O
+├── al_5A_painn/                     # 3-System (5 Å gap) Closed-Loop PaiNN AL Pipeline
+│   ├── run_painn_al_parsl.py        # Active learning entry point (ALProcedurePARSL)
+│   ├── run_painn_al_parsl.slurm     # Slurm launch script for AL (1 GPU + 32 CPU cores)
+│   ├── run_painn_converge.slurm     # Slurm script for 50-epoch post-AL final convergence
+│   ├── al_dataset.xyz               # Accumulated labeled training dataset (535 frames)
+│   ├── val.xyz                      # Validation dataset (145 frames)
+│   ├── control.in                   # FHI-aims electronic structure parameters (PBE + vdW)
+│   └── checkpoints/                 # Saved committee weights per cycle (cycle_0000 to cycle_0050)
 ├── al_5A_mace/                      # Reference aims-PAX MACE Active Learning Pipeline
 │   ├── aimsprobe.yaml               # aims-PAX active learning settings
 │   ├── model.yaml                   # MACE equivariant architecture settings
-│   └── run_mace_al_5A.slurm         # Slurm launch script for aims-PAX MACE
-├── geometries/                      # Initial starting structures (9 geometries: 5, 10, 20 A)
-│   ├── geometry_alpha_5.in          # Alpha-quartz with 5 A water layer
-│   ├── geometry_amor_5.in           # Amorphous silica with 5 A water layer
-│   ├── geometry_beta_5.in           # Beta-cristobalite with 5 A water layer
-│   └── ...                          # 10 A and 20 A interfaces
-├── painn_ensemble_calc.py           # PaiNN ASE Calculator & aims-PAX uncertainty engine
-├── lammps_dumps.py                  # LAMMPS custom dump generator (unified & stress)
-├── dft_interface.py                 # FHI-aims MPI runner & permanent archive manager
-├── retrain_engine.py                # 1-epoch online fine-tuning engine with NaN guards
-├── run_painn_active_learning.py     # Master 9-geometry active learning orchestrator
-├── run_painn_al.slurm               # Slurm launch script (1 GPU + 32 CPU cores, 72h)
-├── compare_mace_vs_painn.py         # 500-step head-to-head MD trajectory comparison engine
-├── generate_comparison_analysis.py  # Comparative analysis & publication figure generator
-├── COMPARATIVE_ACTIVE_LEARNING_REPORT.md  # Comprehensive comparative benchmark report
-├── comparison_figures/              # Publication-quality comparison figures (.png, .pdf)
-├── benchmark_pipeline.py            # 7-kernel reproducibility verification suite
-├── control.in                       # Base FHI-aims DFT parameters (PBE + Hirshfeld vdW)
+│   ├── run_mace_al_5A.slurm         # Slurm script for MACE active learning
+│   ├── run_mace_converge.slurm      # Slurm script for MACE 200-epoch convergence
+│   └── data/final/                  # Final MACE datasets (509 train, 142 val frames)
+├── comparison_figures/              # Publication-quality comparison figures (Figures 1-6, PNG)
+├── comparison_results/              # Detailed metrics, trajectory logs, and JSON summaries
+├── generate_post_al_figures.py      # Post-AL figure generator (Figure 5 & Figure 6)
+├── geometries/                      # Initial 5 Å, 10 Å, and 20 Å silica-water interface structures
+├── archive/                         # Archived legacy scripts, monolithic prototypes & slurm logs
+├── LICENSE                          # MIT License
 ├── .gitignore                       # Clean repository exclusions
 └── README.md                        # Documentation
 ```
@@ -99,39 +107,28 @@ where:
 ## 🚀 Getting Started
 
 ### Prerequisites
-- **Python Environment**: Conda environment with `nff`, `torch` (>= 2.5), `ase`, `scipy`, `numpy`.
+- **Python Environment**: Conda environment (`nff`) with `torch` (>= 2.5), `nff`, `ase`, `parsl`, `scipy`, `numpy`.
 - **Quantum Chemistry Code**: `FHI-aims` compiled with MPI (Intel oneAPI or OpenMPI).
 - **Species Defaults**: Standard FHI-aims species defaults directory (`defaults_2020/light`).
 
-### Configuration
-Edit the paths in [run_painn_active_learning.py](run_painn_active_learning.py) if your directory layout differs:
-```python
-BASE_DIR = Path("/path/to/your/working/directory")
-INITIAL_MODEL_DIRS = [
-    Path("/path/to/mine/model_0"),
-    Path("/path/to/mine/model_1"),
-    Path("/path/to/mine/model_2"),
-    Path("/path/to/merged/model_0"),
-    Path("/path/to/merged/model_1"),
-    Path("/path/to/merged/model_2"),
-]
-SPECIES_DIR = Path("/path/to/fhi-aims/species_defaults/defaults_2020/light")
-AIMS_BIN = "/path/to/fhi-aims/bin/aims.x"
+### Running PaiNN Active Learning
+To execute the closed-loop active learning procedure across the 3 silica-water interfaces:
+```bash
+cd al_5A_painn
+sbatch run_painn_al_parsl.slurm
 ```
 
-### Running on Slurm
-Submit the single-node batch script to your cluster (configured for `metano` partition):
+### Running Post-AL Final Convergence
+To train the committee for 50 full epochs on the accumulated active learning dataset:
 ```bash
-sbatch run_painn_al.slurm
+cd al_5A_painn
+sbatch run_painn_converge.slurm
 ```
 
-### Running Interactively / Dry Run
+### Generating Publication Figures
+To regenerate Figures 5 and 6 comparing MACE and PaiNN (high-resolution PNG):
 ```bash
-# Activate environment
-conda activate nff
-
-# Run pipeline directly
-python run_painn_active_learning.py
+python generate_post_al_figures.py
 ```
 
 ---
