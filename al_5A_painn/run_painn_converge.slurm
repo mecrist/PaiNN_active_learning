@@ -36,7 +36,7 @@ cd /home/maria.crist/dft_mlip/sep_pax/al_5A_painn
 
 nvidia-smi
 
-$ENV_PREFIX/bin/python -c "
+$ENV_PREFIX/bin/python -u -c "
 import sys
 from pathlib import Path
 import torch
@@ -44,7 +44,7 @@ import torch
 repo_root = Path('/home/maria.crist/dft_mlip/sep_pax')
 sys.path.insert(0, str(repo_root / 'src'))
 
-from aims_PAX.tools.model_tools.painn_calculator import PainnEnsembleCalculator
+from aims_PAX.tools.model_tools.setup_painn import PainnEnsembleCalculator
 from aims_PAX.tools.model_tools.train_painn import run_final_convergence
 
 base_dir = Path('.').resolve()
@@ -61,11 +61,12 @@ ref_energies = {
 
 print(f'Loading models from cycle 50 checkpoint...')
 calc = PainnEnsembleCalculator(
-    model_paths=[
+    model_dirs=[
         ckpt_dir / 'cycle_0050' / 'model_0',
         ckpt_dir / 'cycle_0050' / 'model_1',
         ckpt_dir / 'cycle_0050' / 'model_2',
     ],
+    ref_energies=ref_energies,
     device='cuda' if torch.cuda.is_available() else 'cpu',
 )
 
