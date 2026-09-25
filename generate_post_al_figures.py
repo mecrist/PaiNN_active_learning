@@ -29,7 +29,7 @@ TRAJ_BETA_XYZ = BASE_DIR / "comparison_results" / "mace_traj_geometry_beta_5.xyz
 TRAJ_AMOR_XYZ = BASE_DIR / "comparison_results" / "mace_traj_geometry_amor_5.xyz"
 TRAJ_ALPHA_XYZ = BASE_DIR / "comparison_results" / "mace_traj_geometry_alpha_5.xyz"
 FIG_DIR = BASE_DIR / "comparison_figures"
-ARTIFACTS_DIR = Path("/home/maria.crist/.gemini/antigravity-cli/brain/254c8bf2-5ded-4d7c-82e2-20a87332976c")
+ARTIFACTS_DIR = Path("/home/maria.crist/.gemini/antigravity-cli/brain/3835c7a3-3ac2-4b9e-abbb-83143e219d97")
 
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
