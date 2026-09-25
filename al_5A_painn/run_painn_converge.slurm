@@ -69,14 +69,15 @@ calc = PainnEnsembleCalculator(
     device='cuda' if torch.cuda.is_available() else 'cpu',
 )
 
-print(f'Starting final convergence routine (50 epochs)...')
+print(f'Starting final convergence routine (max 200 epochs, early stopping patience 30)...')
 run_final_convergence(
     calculator=calc,
     dataset_path=dataset_path,
     val_dataset_path=val_dataset_path,
     ref_energies=ref_energies,
     output_dir=out_dir,
-    n_epochs=50,
+    n_epochs=200,
+    patience=30,
     lr=1e-4,
     batch_size=4,
     device='cuda' if torch.cuda.is_available() else 'cpu',

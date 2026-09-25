@@ -253,16 +253,17 @@ def run_final_convergence(
     ref_energies: Dict[int, float],
     output_dir: Union[str, Path],
     val_dataset_path: Optional[Union[str, Path]] = None,
-    n_epochs: int = 50,
+    n_epochs: int = 200,
+    patience: int = 30,
     batch_size: int = 4,
     lr: float = 1e-4,
     device: str = "cuda:0" if torch.cuda.is_available() else "cpu",
 ):
     """
     Final convergence routine: trains the ensemble on the completed active learning
-    dataset for a full run (default 50 epochs) to achieve fully converged models.
+    dataset with Early Stopping (default max 200 epochs, patience 30) matching aims-PAX.
     """
-    print(f"\n[FINAL CONVERGENCE] Training {len(calculator.models)} PaiNN models for {n_epochs} epochs...")
+    print(f"\n[FINAL CONVERGENCE] Training {len(calculator.models)} PaiNN models (max {n_epochs} epochs, patience {patience})...")
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -301,6 +302,7 @@ def run_final_convergence(
         train_hooks = [
             hooks.MaxEpochHook(n_epochs),
             EMAHook(ema),
+            hooks.EarlyStoppingHook(patience=patience),
         ]
 
         trainer = Trainer(
@@ -310,11 +312,11 @@ def run_final_convergence(
             optimizer=optimizer,
             train_loader=train_loader,
             validation_loader=validation_loader,
-            checkpoint_interval=5,
+            checkpoint_interval=1,
             hooks=train_hooks,
         )
         trainer.grad_is_nan = types.MethodType(grad_is_finite, trainer)
-        print(f"  --> Converging Model {idx} ({n_epochs} epochs)...")
+        print(f"  --> Converging Model {idx} (max {n_epochs} epochs, early stopping patience {patience})...")
         trainer.train(device=torch.device(device), n_epochs=n_epochs)
 
         best_path = m_dir / "best_model"
