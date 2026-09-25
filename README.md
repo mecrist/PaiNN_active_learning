@@ -94,6 +94,7 @@ The source code follows the three-layer architectural separation of **aims-PAX**
 │   └── data/final/                  # Final MACE datasets (509 train, 142 val frames)
 ├── comparison_figures/              # Publication-quality comparison figures (Figures 1-6, PNG)
 ├── comparison_results/              # Detailed metrics, trajectory logs, and JSON summaries
+├── figures_sep_pax_models/          # Performance graphs of PaiNN & MACE baseline models (our dataset)
 ├── generate_post_al_figures.py      # Post-AL figure generator (Figure 5 & Figure 6)
 ├── geometries/                      # Initial 5 Å, 10 Å, and 20 Å silica-water interface structures
 ├── archive/                         # Archived legacy scripts, monolithic prototypes & slurm logs
