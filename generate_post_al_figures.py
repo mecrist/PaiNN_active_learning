@@ -104,19 +104,16 @@ def save_fig(fig, name):
 
 
 # ==============================================================================
-# FIGURE 1: ACTIVE LEARNING DYNAMICS (HEAD-TO-HEAD: MACE vs. PAINN)
+# FIGURE 1: ACTIVE LEARNING DYNAMICS (SEPARATE DEDICATED PLOTS FOR MACE & PAINN)
 # ==============================================================================
-def generate_figure1():
-    print("[Figure 1] Generating Head-to-Head Active Learning Dynamics...")
-    
-    # 1. Parse MACE AL (Job 162797)
+def generate_figure1_mace():
+    print("[Figure 1 - MACE] Generating MACE Active Learning Dynamics...")
     mace_text = MACE_AL_OUT.read_text() if MACE_AL_OUT.exists() else ""
     mace_eps = re.findall(
         r"Epoch 0: head: Default, loss=([0-9\.]+), MAE_E_per_atom=\s*([0-9\.]+) meV, MAE_F=\s*([0-9\.]+) meV / A",
         mace_text,
     )
     mace_cycles = np.arange(1, len(mace_eps) + 1)
-    mace_loss = [float(x[0]) for x in mace_eps]
     mace_e_mae = [float(x[1]) for x in mace_eps]
     mace_f_mae = [float(x[2]) for x in mace_eps]
 
@@ -128,7 +125,45 @@ def generate_figure1():
     mace_u = [float(t[2].rstrip(".")) * 1000.0 for t in mace_trigs]
     mace_trig_idx = np.arange(1, len(mace_th) + 1)
 
-    # 2. Parse PaiNN AL (Job 163735)
+    fig, (ax_err, ax_th) = plt.subplots(1, 2, figsize=(11.0, 4.6))
+    fig.subplots_adjust(wspace=0.35)
+
+    # Panel (a): Combined Online Force & Energy Error Progression (Dual Y-Axis)
+    panel_label(ax_err, "(a)")
+    col_title(ax_err, "Online Accuracy Progression (MACE)")
+    ax_err.set_xlabel("Active Learning Cycle")
+    ax_err.set_ylabel("Validation Force MAE (meV/Å)", color=ORANGE, fontweight="bold")
+    line_f = ax_err.plot(mace_cycles, mace_f_mae, marker="o", markersize=5.0, color=ORANGE, lw=1.8, label="Force MAE (meV/Å)")
+    ax_err.tick_params(axis="y", labelcolor=ORANGE)
+    style_axes(ax_err)
+
+    ax_e = ax_err.twinx()
+    ax_e.set_ylabel("Validation Energy MAE (meV/atom)", color=LIGHT_BLUE, fontweight="bold")
+    line_e = ax_e.plot(mace_cycles, mace_e_mae, marker="s", markersize=4.5, color=LIGHT_BLUE, lw=1.8, linestyle="--", label="Energy MAE (meV/atom)")
+    ax_e.tick_params(axis="y", labelcolor=LIGHT_BLUE)
+    ax_e.spines["top"].set_visible(False)
+
+    lines = line_f + line_e
+    labels = [l.get_label() for l in lines]
+    ax_err.legend(lines, labels, loc="upper right", frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5)
+
+    # Panel (b): Adaptive Uncertainty Threshold & Trigger Queries
+    panel_label(ax_th, "(b)")
+    col_title(ax_th, "Adaptive Uncertainty Threshold & Queries (MACE)")
+    ax_th.set_xlabel("Acquisition Trigger Event Index")
+    ax_th.set_ylabel("Force Uncertainty (meV/Å)")
+    line_th = ax_th.plot(mace_trig_idx, mace_th, color=ORANGE, lw=1.8, label="Dynamic Threshold $\\tau$")
+    ax_th.scatter(mace_trig_idx, mace_u, color=INK, marker="x", s=50, lw=1.8, zorder=5, label="Trigger Queries ($U > \\tau$)")
+    style_axes(ax_th)
+    ax_th.legend(loc="upper right", frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5)
+
+    fig.suptitle("MACE Active Learning Dynamics (aims-PAX, 5 Å Gap)", fontsize=11.5, fontweight="bold", color=INK, y=0.99)
+    fig.tight_layout()
+    save_fig(fig, "fig1_mace_active_learning_dynamics")
+
+
+def generate_figure1_painn():
+    print("[Figure 1 - PaiNN] Generating PaiNN Active Learning Dynamics...")
     painn_text = PAINN_AL_OUT.read_text() if PAINN_AL_OUT.exists() else ""
     painn_vals = re.findall(
         r"Cycle (\d+) Validation -> Force MAE:\s*([0-9\.]+)\s*meV/A\s*\|\s*Energy MAE:\s*([0-9\.]+)\s*meV/atom",
@@ -144,79 +179,61 @@ def generate_figure1():
     )
     painn_u = [float(t[0]) * 1000.0 for t in painn_trigs]
     painn_th = [float(t[1]) * 1000.0 for t in painn_trigs]
+    painn_atoms = [t[3] for t in painn_trigs]
     painn_trig_idx = np.arange(1, len(painn_th) + 1)
 
-    fig, ((ax1a, ax1b), (ax1c, ax1d)) = plt.subplots(2, 2, figsize=(10.5, 8.0))
-    fig.subplots_adjust(hspace=0.35, wspace=0.30)
+    fig, (ax_err, ax_th) = plt.subplots(1, 2, figsize=(11.0, 4.6))
+    fig.subplots_adjust(wspace=0.35)
 
-    # (a) Online Validation Force Error Progression
-    if len(mace_cycles) > 0:
-        ax1a.plot(mace_cycles, mace_f_mae, marker="o", markersize=4.5, color=ORANGE, lw=1.8, label="MACE (aims-PAX)")
-    if len(painn_cycles) > 0:
-        ax1a.plot(painn_cycles, painn_f_mae, marker="s", markersize=3.5, color=PURPLE, lw=1.5, linestyle="--", label="PaiNN (Parsl AL)")
-    ax1a.set_xlabel("Active Learning Cycle")
-    ax1a.set_ylabel("Validation Force MAE (meV/Å)")
-    col_title(ax1a, "Online Force Accuracy Progression")
-    panel_label(ax1a, "(a)")
-    style_axes(ax1a)
-    ax1a.legend(loc="upper right")
+    # Panel (a): Combined Online Force & Energy Error Progression (Dual Y-Axis)
+    panel_label(ax_err, "(a)")
+    col_title(ax_err, "Online Accuracy Progression (PaiNN)")
+    ax_err.set_xlabel("Active Learning Cycle")
+    ax_err.set_ylabel("Validation Force MAE (meV/Å)", color=PURPLE, fontweight="bold")
+    line_f = ax_err.plot(painn_cycles, painn_f_mae, marker="s", markersize=3.5, color=PURPLE, lw=1.6, label="Force MAE (meV/Å)")
+    ax_err.tick_params(axis="y", labelcolor=PURPLE)
+    style_axes(ax_err)
 
-    # (b) Online Validation Energy Error Progression
-    if len(mace_cycles) > 0:
-        ax1b.plot(mace_cycles, mace_e_mae, marker="o", markersize=4.5, color=ORANGE, lw=1.8, label="MACE Total E MAE")
-    if len(painn_cycles) > 0:
-        ax1b.plot(painn_cycles, painn_e_mae, marker="s", markersize=3.5, color=PURPLE, lw=1.5, linestyle="--", label="PaiNN Residual E MAE*")
-    ax1b.set_xlabel("Active Learning Cycle")
-    ax1b.set_ylabel("Validation Energy MAE (meV/atom)")
-    col_title(ax1b, "Online Energy Accuracy Progression")
-    panel_label(ax1b, "(b)")
-    style_axes(ax1b)
-    ax1b.legend(loc="upper right")
+    ax_e = ax_err.twinx()
+    ax_e.set_ylabel("Validation Residual Energy MAE (meV/atom)*", color=TEAL, fontweight="bold")
+    line_e = ax_e.plot(painn_cycles, painn_e_mae, marker="^", markersize=3.5, color=TEAL, lw=1.6, linestyle="--", label="Energy MAE (Residual)*")
+    ax_e.tick_params(axis="y", labelcolor=TEAL)
+    ax_e.spines["top"].set_visible(False)
 
-    # (c) Dynamic Rolling Threshold Tightening & Queries
-    if len(mace_th) > 0:
-        ax1c.plot(mace_trig_idx, mace_th, color=ORANGE, lw=1.6, label="MACE Threshold $U_{\\rm thresh}$")
-        ax1c.scatter(mace_trig_idx, mace_u, color=ORANGE, marker="x", s=40, lw=1.5, label="MACE Queries")
-    if len(painn_th) > 0:
-        sample_step = max(1, len(painn_th) // 25)
-        ax1c.plot(painn_trig_idx[::sample_step], painn_th[::sample_step], color=PURPLE, lw=1.5, linestyle="--", label="PaiNN Threshold")
-        ax1c.scatter(painn_trig_idx[::sample_step], painn_u[::sample_step], color=PURPLE, marker="+", s=45, lw=1.5, label="PaiNN Queries")
-    ax1c.set_xlabel("Acquisition Trigger Event Index")
-    ax1c.set_ylabel("Force Uncertainty (meV/Å)")
-    col_title(ax1c, "Dynamic Threshold Tightening & Queries")
-    panel_label(ax1c, "(c)")
-    style_axes(ax1c, logy=True)
-    ax1c.legend(loc="upper right", fontsize=8.0)
+    lines = line_f + line_e
+    labels = [l.get_label() for l in lines]
+    ax_err.legend(lines, labels, loc="upper right", frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5)
 
-    # (d) Dataset Accumulation via Targeted DFT Queries
-    x_pos = np.arange(3)
-    base_counts = [490, 490, 490]
-    mace_added = 21   # 19 train + 2 val
-    painn_added = 50  # 45 train + 5 val
-    
-    ax1d.bar(x_pos[0], 490, color=MUTED, width=0.45, label="Pre-AL Baseline Dataset")
-    ax1d.bar(x_pos[1], 490, color=MUTED, width=0.45)
-    ax1d.bar(x_pos[1], mace_added, bottom=490, color=ORANGE, width=0.45, label="MACE AL Queries (+21)")
-    ax1d.bar(x_pos[2], 490, color=MUTED, width=0.45)
-    ax1d.bar(x_pos[2], painn_added, bottom=490, color=PURPLE, width=0.45, label="PaiNN AL Queries (+50)")
+    # Panel (b): Rolling Adaptive Uncertainty Threshold & Queries
+    panel_label(ax_th, "(b)")
+    col_title(ax_th, "Rolling Adaptive Threshold & Queries (PaiNN)")
+    ax_th.set_xlabel("Acquisition Trigger Event Index")
+    ax_th.set_ylabel("Force Uncertainty (meV/Å)")
 
-    ax1d.set_xticks(x_pos)
-    ax1d.set_xticklabels(["Pre-AL Initial", "MACE (Post-AL)", "PaiNN (Post-AL)"])
-    ax1d.set_ylabel("Total Dataset Configurations")
-    ax1d.set_ylim(0, 650)
-    ax1d.text(0, 505, "490 frames", ha="center", fontsize=8.5, fontweight="medium")
-    ax1d.text(1, 525, "511 frames\n(+21 queries)", ha="center", fontsize=8.5, fontweight="bold", color=ORANGE)
-    ax1d.text(2, 555, "540 frames\n(+50 queries)", ha="center", fontsize=8.5, fontweight="bold", color=PURPLE)
-    col_title(ax1d, "Dataset Expansion via Targeted DFT Queries")
-    panel_label(ax1d, "(d)")
-    style_axes(ax1d)
-    ax1d.legend(loc="upper left", fontsize=8.0)
+    # Sample threshold for smooth visualization
+    sample_step = max(1, len(painn_th) // 30)
+    ax_th.plot(painn_trig_idx[::sample_step], painn_th[::sample_step], color=PURPLE, lw=1.8, label="Adaptive Threshold $\\tau(t)$")
 
-    fig.suptitle("Active Learning Dynamics: AIMS-PAX MACE vs. PaiNN-AL (5 Å Interface)", fontsize=12.0, fontweight="bold", color=INK, y=0.995)
-    fig.text(0.5, -0.01, "*Note: PaiNN energy MAE evaluates in-distribution residual after fitted linear elemental E0 subtraction; MACE predicts raw total energy.",
+    # Plot queries marked by trigger atom type
+    for elem, color, marker, label in [("H", "#D90429", "o", "H+ (Proton, 81.5%)"),
+                                       ("Si", "#457B9D", "s", "Si (14.8%)"),
+                                       ("O", "#2A9D8F", "^", "O (3.7%)")]:
+        idxs = [i for i, at in enumerate(painn_atoms) if at == elem]
+        if idxs:
+            ax_th.scatter(painn_trig_idx[idxs], np.array(painn_u)[idxs], color=color, marker=marker, s=36, alpha=0.85, label=f"Query: {label}", zorder=5)
+
+    # Annotation for threshold freeze
+    ax_th.axvline(50, color=MUTED, linestyle=":", lw=1.2)
+    ax_th.text(49, 1500, "Threshold Frozen\n(Dataset = 540)", rotation=90, va="center", ha="right", fontsize=7.5, color=MUTED)
+
+    style_axes(ax_th, logy=True)
+    ax_th.legend(loc="upper left", frameon=True, facecolor="white", edgecolor=MUTED, fontsize=7.8)
+
+    fig.suptitle("PaiNN Active Learning Dynamics (Parsl Closed-Loop, 5 Å Gap)", fontsize=11.5, fontweight="bold", color=INK, y=0.99)
+    fig.text(0.5, -0.02, "*Note: PaiNN energy MAE evaluates in-distribution residual after elemental E0 subtraction.",
              ha="center", fontsize=7.5, color=MUTED, style="italic")
     fig.tight_layout()
-    save_fig(fig, "fig1_active_learning_dynamics")
+    save_fig(fig, "fig1_painn_active_learning_dynamics")
 
 
 # ==============================================================================
@@ -522,7 +539,8 @@ if __name__ == "__main__":
     print("GENERATING HEAD-TO-HEAD ACTIVE LEARNING BENCHMARK SUITE (MACE vs. PAINN)")
     print("Output directory: ", FIG_DIR)
     print("=" * 80)
-    generate_figure1()
+    generate_figure1_mace()
+    generate_figure1_painn()
     generate_figure2()
     generate_figure3()
     generate_figure4()
