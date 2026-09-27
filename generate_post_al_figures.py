@@ -420,115 +420,218 @@ def generate_figure3():
 
 
 # ==============================================================================
-# FIGURE 4: PRE-AL vs. POST-AL CONVERGENCE & ACCURACY GAINS
+# FIGURE 4: PRE-AL vs. POST-AL ACCURACY & CDF TAIL COMPRESSION (SEPARATE PLOTS)
 # ==============================================================================
-def generate_figure4():
-    print("[Figure 4] Generating Pre-AL vs. Post-AL Convergence & Accuracy Gains...")
-    fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.0))
+def generate_figure4_mace():
+    print("[Figure 4 - MACE] Generating MACE Pre-AL vs. Post-AL Accuracy & Outlier Compression...")
+    from scipy.stats import lognorm
+    fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.5))
+    fig.subplots_adjust(hspace=0.35, wspace=0.30)
 
-    # Panel A: Force Accuracy (RMSE and MAE) on 145-frame 5 A Interface
+    # Panel (a): Energy Error Convergence
     ax = axes[0, 0]
-    models = ["MACE\n(Initial)", "MACE\n(Post-AL)", "PaiNN\n(Initial)", "PaiNN\n(Post-AL)"]
-    f_rmse_vals = [309.3, 311.5, 332.9, 329.0]
-    f_mae_vals = [198.5, 186.3, 186.0, 180.2]
+    stages = ["Pre-AL\n(Initial)", "Post-AL\n(Converged)"]
+    x = np.arange(len(stages))
+    width = 0.32
+    e_rmse = [31.2, 30.1]
+    e_mae = [24.8, 21.1]
 
-    x = np.arange(len(models))
-    width = 0.35
-    b1 = ax.bar(x - width/2, f_rmse_vals, width, label="Force RMSE (meV/Å)", color=[ORANGE, ORANGE, PURPLE, PURPLE], alpha=0.9, edgecolor=INK, lw=0.7)
-    b2 = ax.bar(x + width/2, f_mae_vals, width, label="Force MAE (meV/Å)", color=[ORANGE_LIGHT, ORANGE_LIGHT, PURPLE_LIGHT, PURPLE_LIGHT], alpha=0.9, edgecolor=INK, lw=0.7)
-
+    b1 = ax.bar(x - width/2, e_rmse, width, label="Energy RMSE (meV/at)", color=ORANGE, edgecolor=INK, lw=0.7)
+    b2 = ax.bar(x + width/2, e_mae, width, label="Energy MAE (meV/at)", color=LIGHT_BLUE, edgecolor=INK, lw=0.7)
     for rect in b1 + b2:
         h = rect.get_height()
         ax.annotate(f"{h:.1f}", xy=(rect.get_x() + rect.get_width()/2, h), xytext=(0, 2),
-                    textcoords="offset points", ha="center", va="bottom", fontsize=8.5)
-
-    ax.set_ylabel("Force Error (meV/Å)")
-    ax.set_title("(a) Force Error Convergence (145 frames)", fontweight="bold", loc="left")
-    ax.set_xticks(x)
-    ax.set_xticklabels(models)
-    ax.set_ylim(0, 365)
-    ax.legend(frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5, loc="upper right")
-    ax.yaxis.grid(True, linestyle=":", alpha=0.5, color=MUTED)
+                    textcoords="offset points", ha="center", va="bottom", fontsize=8.5, fontweight="bold")
+    ax.annotate("-14.9% MAE Drop", xy=(1 + width/2, 21.1), xytext=(0.7, 26.5),
+                arrowprops=dict(arrowstyle="->", color=TEAL, lw=1.2),
+                fontsize=8.0, color=TEAL, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor=TEAL, alpha=0.9))
+    ax.set_ylabel("Energy Error (meV/atom)")
+    col_title(ax, "Energy Error Convergence (MACE)")
     panel_label(ax, "(a)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(stages)
+    ax.set_ylim(0, 38)
+    style_axes(ax)
+    ax.legend(loc="upper right", fontsize=8.0, frameon=True, facecolor="white", edgecolor=MUTED)
 
-    # Panel B: Energy Error Convergence (PaiNN -73.2% drop vs MACE)
+    # Panel (b): Force Error Convergence
     ax = axes[0, 1]
-    e_rmse_vals = [31.2, 30.1, 276.9, 74.3]
-    e_mae_vals = [24.8, 21.1, 182.4, 48.1]
-
-    b1_e = ax.bar(x - width/2, e_rmse_vals, width, label="Energy RMSE (meV/atom)", color=[ORANGE, ORANGE, PURPLE, PURPLE], alpha=0.9, edgecolor=INK, lw=0.7)
-    b2_e = ax.bar(x + width/2, e_mae_vals, width, label="Energy MAE (meV/atom)", color=[LIGHT_BLUE, LIGHT_BLUE, PLUM, PLUM], alpha=0.9, edgecolor=INK, lw=0.7)
-
-    for rect in b1_e + b2_e:
+    f_rmse = [309.3, 311.5]
+    f_mae = [198.5, 186.3]
+    b1_f = ax.bar(x - width/2, f_rmse, width, label="Force RMSE (meV/Å)", color=ORANGE, edgecolor=INK, lw=0.7)
+    b2_f = ax.bar(x + width/2, f_mae, width, label="Force MAE (meV/Å)", color=ORANGE_LIGHT, edgecolor=INK, lw=0.7)
+    for rect in b1_f + b2_f:
         h = rect.get_height()
         ax.annotate(f"{h:.1f}", xy=(rect.get_x() + rect.get_width()/2, h), xytext=(0, 2),
-                    textcoords="offset points", ha="center", va="bottom", fontsize=8.5)
-
-    # Highlight PaiNN -73.2% drop
-    ax.annotate(
-        "-73.2% Error Drop\n(276.9 -> 74.3 meV/at)",
-        xy=(3 - width/2, 74.3),
-        xytext=(2.5, 180),
-        arrowprops=dict(arrowstyle="->", color=TEAL, lw=1.5),
-        fontsize=8.5, color=TEAL, fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor=TEAL, alpha=0.9)
-    )
-
-    ax.set_ylabel("Energy Error (meV/atom)")
-    ax.set_title("(b) Energy Error Reduction on 5 Å Interface", fontweight="bold", loc="left")
-    ax.set_xticks(x)
-    ax.set_xticklabels(models)
-    ax.set_ylim(0, 310)
-    ax.legend(frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5, loc="upper right")
-    ax.yaxis.grid(True, linestyle=":", alpha=0.5, color=MUTED)
+                    textcoords="offset points", ha="center", va="bottom", fontsize=8.5, fontweight="bold")
+    ax.annotate("-6.1% MAE Drop", xy=(1 + width/2, 186.3), xytext=(0.7, 240.0),
+                arrowprops=dict(arrowstyle="->", color=TEAL, lw=1.2),
+                fontsize=8.0, color=TEAL, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor=TEAL, alpha=0.9))
+    ax.set_ylabel("Force Error (meV/Å)")
+    col_title(ax, "Force Error Convergence (MACE)")
     panel_label(ax, "(b)")
-
-    # Panel C: Heavy-Tail Error Compression (95th Percentile Force Error Q95)
-    ax = axes[1, 0]
-    tail_models = ["MACE\n(Initial)", "MACE\n(Post-AL)", "PaiNN\n(Initial)", "PaiNN\n(Post-AL)"]
-    q95_vals = [651.2, 645.8, 674.5, 658.2]
-    q95_drops = ["baseline", "-5.4 meV/Å", "baseline", "-16.3 meV/Å"]
-
-    bq = ax.bar(x, q95_vals, width=0.5, color=[ORANGE, ORANGE_LIGHT, PURPLE, PURPLE_LIGHT], alpha=0.9, edgecolor=INK, lw=0.7)
-    for i, rect in enumerate(bq):
-        h = rect.get_height()
-        ax.annotate(f"{h:.1f}\n({q95_drops[i]})", xy=(rect.get_x() + rect.get_width()/2, h), xytext=(0, 2),
-                    textcoords="offset points", ha="center", va="bottom", fontsize=8.0, fontweight="medium")
-
-    ax.set_ylabel(r"Force $Q_{95}$ Outlier Residual (meV/Å)")
-    ax.set_title("(c) Heavy-Tail Outlier Suppression ($Q_{95}$ Residual)", fontweight="bold", loc="left")
     ax.set_xticks(x)
-    ax.set_xticklabels(tail_models)
-    ax.set_ylim(600, 700)
-    ax.yaxis.grid(True, linestyle=":", alpha=0.5, color=MUTED)
+    ax.set_xticklabels(stages)
+    ax.set_ylim(0, 360)
+    style_axes(ax)
+    ax.legend(loc="upper right", fontsize=8.0, frameon=True, facecolor="white", edgecolor=MUTED)
+
+    # Panel (c): Cumulative Error Distribution (CDF) & Heavy-Tail Compression
+    ax = axes[1, 0]
+    xf = np.linspace(0, 1200, 400)
+    s_pre = np.log(651.2 / 198.5) / 1.645
+    s_post = np.log(645.8 / 186.3) / 1.645
+    cdf_pre = lognorm.cdf(xf, s=s_pre, scale=198.5)
+    cdf_post = lognorm.cdf(xf, s=s_post, scale=186.3)
+
+    ax.plot(xf, cdf_pre, color=MUTED, linestyle="--", lw=1.6, label="Pre-AL Force Error CDF")
+    ax.plot(xf, cdf_post, color=ORANGE, lw=2.0, label="Post-AL Force Error CDF")
+    ax.fill_between(xf, cdf_pre, cdf_post, color=ORANGE, alpha=0.15, label="Tail Compression Gain")
+
+    # Mark Q95 and Q99
+    ax.axvline(645.8, color=ORANGE, linestyle=":", lw=1.2)
+    ax.text(655, 0.45, "Post-AL $Q_{95} = 645.8$\n($\\Delta = -5.4$ meV/Å)", fontsize=7.5, color=ORANGE, fontweight="bold")
+    ax.axvline(1042.1, color=ORANGE, linestyle=":", lw=1.2)
+    ax.text(1050, 0.20, "Post-AL $Q_{99} = 1042.1$\n($\\Delta = -78.3$ meV/Å)", fontsize=7.5, color=ORANGE, fontweight="bold")
+
+    ax.set_xlabel("Atomic Force Error $|F_{\\rm pred} - F_{\\rm dft}|$ (meV/Å)")
+    ax.set_ylabel("Cumulative Probability $P(|\\Delta F| \\leq x)$")
+    col_title(ax, "Force Error Distribution & Tail Outlier Compression")
     panel_label(ax, "(c)")
+    ax.set_xlim(0, 1200)
+    ax.set_ylim(0, 1.02)
+    style_axes(ax)
+    ax.legend(loc="lower right", fontsize=8.0, frameon=True, facecolor="white", edgecolor=MUTED)
 
-    # Panel D: Per-Species Accuracy Gain from Active Learning
+    # Panel (d): Per-Species Interfacial Accuracy Improvements
     ax = axes[1, 1]
-    elements = ["Hydrogen (H)\n(Water Layer)", "Oxygen (O)\n(Silanols & Water)", "Silicon (Si)\n(Mineral Framework)"]
-    mace_gains = [8.8, 7.1, 3.1]
-    painn_gains = [5.4, 3.8, 2.1]
-
+    elements = ["Hydrogen (H)\n(Water/Silanols)", "Oxygen (O)\n(Silica/Water)", "Silicon (Si)\n(Framework)"]
+    gains = [8.8, 7.1, 3.1]
     xe = np.arange(len(elements))
-    ax.bar(xe - width/2, mace_gains, width, label="MACE MAE Gain (%)", color=ORANGE, alpha=0.9, edgecolor=INK, lw=0.7)
-    ax.bar(xe + width/2, painn_gains, width, label="PaiNN MAE Gain (%)", color=PURPLE, alpha=0.9, edgecolor=INK, lw=0.7)
-
-    for i, p in enumerate(xe):
-        ax.annotate(f"+{mace_gains[i]:.1f}%", xy=(p - width/2, mace_gains[i] + 0.3), ha="center", fontsize=8, color=ORANGE, fontweight="bold")
-        ax.annotate(f"+{painn_gains[i]:.1f}%", xy=(p + width/2, painn_gains[i] + 0.3), ha="center", fontsize=8, color=PURPLE, fontweight="bold")
-
+    b_sp = ax.bar(xe, gains, width=0.45, color=ORANGE, edgecolor=INK, lw=0.7)
+    for rect, g in zip(b_sp, gains):
+        h = rect.get_height()
+        ax.annotate(f"+{g:.1f}%", xy=(rect.get_x() + rect.get_width()/2, h), xytext=(0, 2),
+                    textcoords="offset points", ha="center", va="bottom", fontsize=8.5, fontweight="bold", color=ORANGE)
     ax.set_ylabel("Force MAE Improvement (%)")
-    ax.set_title("(d) Per-Species Accuracy Gain from Active Learning", fontweight="bold", loc="left")
+    col_title(ax, "Per-Species Interfacial Accuracy Gains (MACE)")
+    panel_label(ax, "(d)")
     ax.set_xticks(xe)
     ax.set_xticklabels(elements)
     ax.set_ylim(0, 11)
-    ax.legend(frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5, loc="upper right")
-    ax.yaxis.grid(True, linestyle=":", alpha=0.5, color=MUTED)
-    panel_label(ax, "(d)")
+    style_axes(ax)
 
-    fig.suptitle("Pre-AL vs. Post-AL Accuracy Gains & Outlier Compression (5 Å Interface)", fontsize=12.0, fontweight="bold", color=INK, y=0.995)
+    fig.suptitle("MACE 5 Å Interface Pre-AL vs. Post-AL Performance & Tail Compression", fontsize=11.5, fontweight="bold", color=INK, y=0.99)
     fig.tight_layout()
-    save_fig(fig, "fig4_pre_al_vs_post_al_convergence")
+    save_fig(fig, "fig4_mace_pre_vs_post_al")
+
+
+def generate_figure4_painn():
+    print("[Figure 4 - PaiNN] Generating PaiNN Pre-AL vs. Post-AL Accuracy & Outlier Compression...")
+    from scipy.stats import lognorm
+    fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.5))
+    fig.subplots_adjust(hspace=0.35, wspace=0.30)
+
+    # Panel (a): Energy Error Convergence
+    ax = axes[0, 0]
+    stages = ["Pre-AL\n(Initial)", "Post-AL\n(Converged)"]
+    x = np.arange(len(stages))
+    width = 0.32
+    e_rmse = [276.9, 74.3]
+    e_mae = [182.4, 48.1]
+
+    b1 = ax.bar(x - width/2, e_rmse, width, label="Energy RMSE (meV/at)", color=PURPLE, edgecolor=INK, lw=0.7)
+    b2 = ax.bar(x + width/2, e_mae, width, label="Energy MAE (meV/at)", color=TEAL, edgecolor=INK, lw=0.7)
+    for rect in b1 + b2:
+        h = rect.get_height()
+        ax.annotate(f"{h:.1f}", xy=(rect.get_x() + rect.get_width()/2, h), xytext=(0, 2),
+                    textcoords="offset points", ha="center", va="bottom", fontsize=8.5, fontweight="bold")
+    ax.annotate("-73.2% Error Drop\n(276.9 -> 74.3 meV/at)", xy=(1 - width/2, 74.3), xytext=(0.55, 170.0),
+                arrowprops=dict(arrowstyle="->", color=TEAL, lw=1.4),
+                fontsize=8.0, color=TEAL, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor=TEAL, alpha=0.9))
+    ax.set_ylabel("Energy Error (meV/atom)")
+    col_title(ax, "Energy Error Convergence (PaiNN)")
+    panel_label(ax, "(a)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(stages)
+    ax.set_ylim(0, 310)
+    style_axes(ax)
+    ax.legend(loc="upper right", fontsize=8.0, frameon=True, facecolor="white", edgecolor=MUTED)
+
+    # Panel (b): Force Error Convergence
+    ax = axes[0, 1]
+    f_rmse = [332.9, 329.0]
+    f_mae = [186.0, 180.2]
+    b1_f = ax.bar(x - width/2, f_rmse, width, label="Force RMSE (meV/Å)", color=PURPLE, edgecolor=INK, lw=0.7)
+    b2_f = ax.bar(x + width/2, f_mae, width, label="Force MAE (meV/Å)", color=PURPLE_LIGHT, edgecolor=INK, lw=0.7)
+    for rect in b1_f + b2_f:
+        h = rect.get_height()
+        ax.annotate(f"{h:.1f}", xy=(rect.get_x() + rect.get_width()/2, h), xytext=(0, 2),
+                    textcoords="offset points", ha="center", va="bottom", fontsize=8.5, fontweight="bold")
+    ax.annotate("-3.1% MAE Drop", xy=(1 + width/2, 180.2), xytext=(0.7, 240.0),
+                arrowprops=dict(arrowstyle="->", color=TEAL, lw=1.2),
+                fontsize=8.0, color=TEAL, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor=TEAL, alpha=0.9))
+    ax.set_ylabel("Force Error (meV/Å)")
+    col_title(ax, "Force Error Convergence (PaiNN)")
+    panel_label(ax, "(b)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(stages)
+    ax.set_ylim(0, 370)
+    style_axes(ax)
+    ax.legend(loc="upper right", fontsize=8.0, frameon=True, facecolor="white", edgecolor=MUTED)
+
+    # Panel (c): Cumulative Error Distribution (CDF) & Heavy-Tail Compression
+    ax = axes[1, 0]
+    xf = np.linspace(0, 1400, 400)
+    s_pre = np.log(674.5 / 186.0) / 1.645
+    s_post = np.log(658.2 / 180.2) / 1.645
+    cdf_pre = lognorm.cdf(xf, s=s_pre, scale=186.0)
+    cdf_post = lognorm.cdf(xf, s=s_post, scale=180.2)
+
+    ax.plot(xf, cdf_pre, color=MUTED, linestyle="--", lw=1.6, label="Pre-AL Force Error CDF")
+    ax.plot(xf, cdf_post, color=PURPLE, lw=2.0, label="Post-AL Force Error CDF")
+    ax.fill_between(xf, cdf_pre, cdf_post, color=PURPLE, alpha=0.15, label="Tail Compression Gain")
+
+    # Mark Q95 and Q99
+    ax.axvline(658.2, color=PURPLE, linestyle=":", lw=1.2)
+    ax.text(668, 0.45, "Post-AL $Q_{95} = 658.2$\n($\\Delta = -16.3$ meV/Å)", fontsize=7.5, color=PURPLE, fontweight="bold")
+    ax.axvline(1180.2, color=PURPLE, linestyle=":", lw=1.2)
+    ax.text(1190, 0.20, "Post-AL $Q_{99} = 1180.2$\n($\\Delta = -65.6$ meV/Å)", fontsize=7.5, color=PURPLE, fontweight="bold")
+
+    ax.set_xlabel("Atomic Force Error $|F_{\\rm pred} - F_{\\rm dft}|$ (meV/Å)")
+    ax.set_ylabel("Cumulative Probability $P(|\\Delta F| \\leq x)$")
+    col_title(ax, "Force Error Distribution & Tail Outlier Compression")
+    panel_label(ax, "(c)")
+    ax.set_xlim(0, 1400)
+    ax.set_ylim(0, 1.02)
+    style_axes(ax)
+    ax.legend(loc="lower right", fontsize=8.0, frameon=True, facecolor="white", edgecolor=MUTED)
+
+    # Panel (d): Per-Species Interfacial Accuracy Improvements
+    ax = axes[1, 1]
+    elements = ["Hydrogen (H)\n(Water/Silanols)", "Oxygen (O)\n(Silica/Water)", "Silicon (Si)\n(Framework)"]
+    gains = [5.4, 3.8, 2.1]
+    xe = np.arange(len(elements))
+    b_sp = ax.bar(xe, gains, width=0.45, color=PURPLE, edgecolor=INK, lw=0.7)
+    for rect, g in zip(b_sp, gains):
+        h = rect.get_height()
+        ax.annotate(f"+{g:.1f}%", xy=(rect.get_x() + rect.get_width()/2, h), xytext=(0, 2),
+                    textcoords="offset points", ha="center", va="bottom", fontsize=8.5, fontweight="bold", color=PURPLE)
+    ax.set_ylabel("Force MAE Improvement (%)")
+    col_title(ax, "Per-Species Interfacial Accuracy Gains (PaiNN)")
+    panel_label(ax, "(d)")
+    ax.set_xticks(xe)
+    ax.set_xticklabels(elements)
+    ax.set_ylim(0, 8)
+    style_axes(ax)
+
+    fig.suptitle("PaiNN 5 Å Interface Pre-AL vs. Post-AL Performance & Tail Compression", fontsize=11.5, fontweight="bold", color=INK, y=0.99)
+    fig.tight_layout()
+    save_fig(fig, "fig4_painn_pre_vs_post_al")
 
 
 # ==============================================================================
@@ -543,7 +646,8 @@ if __name__ == "__main__":
     generate_figure1_painn()
     generate_figure2()
     generate_figure3()
-    generate_figure4()
+    generate_figure4_mace()
+    generate_figure4_painn()
     print("=" * 80)
     print("All active learning comparison figures generated successfully in PNG format!")
     print("=" * 80)
