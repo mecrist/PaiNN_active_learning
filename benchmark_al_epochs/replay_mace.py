@@ -156,7 +156,10 @@ def main():
     num_cycles = len(al_pool)
 
     # Load torch model object for fine-tuning
-    model = torch.load(str(current_model_path), map_location=args.device)
+    try:
+        model = torch.load(str(current_model_path), map_location=args.device, weights_only=False)
+    except TypeError:
+        model = torch.load(str(current_model_path), map_location=args.device)
     model.to(args.device)
 
     # Atomic numbers table: H(1), O(8), Si(14)
