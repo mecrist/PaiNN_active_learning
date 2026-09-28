@@ -460,27 +460,27 @@ def generate_figure4_painn():
     x = np.arange(len(stages))
     width = 0.45
 
-    # Panel (a): Energy RMSE Convergence
+    # Panel (a): Energy RMSE Convergence (Actual measured: 13.64 -> 2.70 meV/at)
     panel_label(ax_e, "(a)")
     col_title(ax_e, "Energy RMSE Convergence (PaiNN)")
-    bars_e = ax_e.bar(x, [276.9, 74.3], width, color=PURPLE, edgecolor=INK, lw=0.7)
+    bars_e = ax_e.bar(x, [13.6, 2.7], width, color=PURPLE, edgecolor=INK, lw=0.7)
     ax_e.set_ylabel("Energy RMSE (meV/atom)")
     ax_e.set_xticks(x)
     ax_e.set_xticklabels(stages)
-    ax_e.set_ylim(0, 310)
+    ax_e.set_ylim(0, 18)
     style_axes(ax_e)
     for b in bars_e:
         h = b.get_height()
-        ax_e.text(b.get_x() + b.get_width() / 2, h + 6, f"{h:.1f}", ha="center", va="bottom", fontsize=9.0, color=INK)
+        ax_e.text(b.get_x() + b.get_width() / 2, h + 0.4, f"{h:.1f}", ha="center", va="bottom", fontsize=9.0, color=INK)
 
-    # Panel (b): Force RMSE Convergence
+    # Panel (b): Force RMSE Convergence (Actual measured per component: 317.2 -> 301.9 meV/Å)
     panel_label(ax_f, "(b)")
     col_title(ax_f, "Force RMSE Convergence (PaiNN)")
-    bars_f = ax_f.bar(x, [332.9, 329.0], width, color=PURPLE, edgecolor=INK, lw=0.7)
+    bars_f = ax_f.bar(x, [317.2, 301.9], width, color=PURPLE, edgecolor=INK, lw=0.7)
     ax_f.set_ylabel("Force RMSE (meV/Å)")
     ax_f.set_xticks(x)
     ax_f.set_xticklabels(stages)
-    ax_f.set_ylim(0, 380)
+    ax_f.set_ylim(0, 360)
     style_axes(ax_f)
     for b in bars_f:
         h = b.get_height()
@@ -500,30 +500,30 @@ def generate_figure4_head_to_head():
     x = np.arange(len(stages))
     width = 0.35
 
-    # Panel (a): Energy RMSE
+    # Panel (a): Energy RMSE (Measured: MACE 30.8 -> 2.8, PaiNN 13.6 -> 2.7)
     panel_label(ax_e, "(a)")
     col_title(ax_e, "Energy RMSE Convergence (5 Å Interface)")
-    b1_e = ax_e.bar(x - width/2, [31.2, 30.1], width, label="MACE", color=ORANGE, edgecolor=INK, lw=0.7)
-    b2_e = ax_e.bar(x + width/2, [276.9, 74.3], width, label="PaiNN", color=PURPLE, edgecolor=INK, lw=0.7)
+    b1_e = ax_e.bar(x - width/2, [30.8, 2.8], width, label="MACE", color=ORANGE, edgecolor=INK, lw=0.7)
+    b2_e = ax_e.bar(x + width/2, [13.6, 2.7], width, label="PaiNN", color=PURPLE, edgecolor=INK, lw=0.7)
     ax_e.set_ylabel("Energy RMSE (meV/atom)")
     ax_e.set_xticks(x)
     ax_e.set_xticklabels(stages)
-    ax_e.set_ylim(0, 310)
+    ax_e.set_ylim(0, 36)
     style_axes(ax_e)
     ax_e.legend(frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5, loc="upper right")
     for b in b1_e + b2_e:
         h = b.get_height()
-        ax_e.text(b.get_x() + b.get_width()/2, h + 5, f"{h:.1f}", ha="center", va="bottom", fontsize=8.5, color=INK)
+        ax_e.text(b.get_x() + b.get_width()/2, h + 0.6, f"{h:.1f}", ha="center", va="bottom", fontsize=8.5, color=INK)
 
-    # Panel (b): Force RMSE
+    # Panel (b): Force RMSE (per component: MACE 265.6 -> 272.1, PaiNN 317.2 -> 301.9)
     panel_label(ax_f, "(b)")
     col_title(ax_f, "Force RMSE Convergence (5 Å Interface)")
-    b1_f = ax_f.bar(x - width/2, [309.3, 311.5], width, label="MACE", color=ORANGE, edgecolor=INK, lw=0.7)
-    b2_f = ax_f.bar(x + width/2, [332.9, 329.0], width, label="PaiNN", color=PURPLE, edgecolor=INK, lw=0.7)
+    b1_f = ax_f.bar(x - width/2, [265.6, 272.1], width, label="MACE", color=ORANGE, edgecolor=INK, lw=0.7)
+    b2_f = ax_f.bar(x + width/2, [317.2, 301.9], width, label="PaiNN", color=PURPLE, edgecolor=INK, lw=0.7)
     ax_f.set_ylabel("Force RMSE (meV/Å)")
     ax_f.set_xticks(x)
     ax_f.set_xticklabels(stages)
-    ax_f.set_ylim(0, 380)
+    ax_f.set_ylim(0, 390)
     style_axes(ax_f)
     ax_f.legend(frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5, loc="upper right")
     for b in b1_f + b2_f:

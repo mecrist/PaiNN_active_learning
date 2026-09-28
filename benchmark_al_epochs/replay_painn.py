@@ -31,10 +31,11 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from aims_PAX.tools.model_tools.setup_painn import setup_painn_ensemble, PainnEnsembleCalculator
 from aims_PAX.tools.model_tools.train_painn import retrain_painn_ensemble, run_final_convergence
 
+# Reference energies matching the base pre-trained PaiNN committee (from reference_energies.json)
 REF_ENERGIES = {
-    1: 1295.1619808355229,
-    8: -4671.611073387086,
-    14: -2659.5960319024257,
+    1: 1295.1619808355229,    # H (eV)
+    8: -4671.611073387086,    # O (eV)
+    14: -2659.5960319024257,  # Si (eV)
 }
 KCAL_TO_MEV = 43.36414
 
