@@ -33,8 +33,8 @@ cd /home/maria.crist/dft_mlip/sep_pax/benchmark_al_epochs
 
 nvidia-smi
 
-# Target epoch counts to test
-EPOCHS_LIST=(2 3 5 10)
+# Target epoch counts to test (matching completed PaiNN suites: 2, 3, 5)
+EPOCHS_LIST=(2 3 5)
 
 for EP in "${EPOCHS_LIST[@]}"; do
     echo "----------------------------------------------------------"

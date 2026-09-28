@@ -132,13 +132,14 @@ def main():
     panel_label(ax, "(b)")
     col_title(ax, "Test Force RMSE Progression vs. AL Cycle")
     ax.set_xlabel("Active Learning Cycle (Unified Pool)")
-    ax.set_ylabel("Force RMSE (meV/Å)")
+    ax.set_ylabel("Force RMSE per Component (meV/Å)")
 
+    # Standardize to per-component RMSE (RMSE_vector / sqrt(3)) to match literature & Figure 4
     for name, data in painn_results.items():
         ep = data["config"]["epochs_per_cycle"]
         ls, lw, alpha = epoch_styles.get(ep, ("-", 1.5, 0.8))
         cycles = [c["cycle"] for c in data["cycles"] if c.get("test_eval")]
-        f_rmse = [c["test_eval"]["force_rmse_mev_per_A"] for c in data["cycles"] if c.get("test_eval")]
+        f_rmse = [c["test_eval"]["force_rmse_mev_per_A"] / np.sqrt(3.0) for c in data["cycles"] if c.get("test_eval")]
         if len(cycles) > 0:
             ax.plot(cycles, f_rmse, color=PURPLE, linestyle=ls, lw=lw, alpha=alpha, label=f"PaiNN ({ep} ep)")
 
@@ -146,7 +147,7 @@ def main():
         ep = data["config"]["epochs_per_cycle"]
         ls, lw, alpha = epoch_styles.get(ep, ("-", 1.5, 0.8))
         cycles = [c["cycle"] for c in data["cycles"] if c.get("test_eval")]
-        f_rmse = [c["test_eval"]["force_rmse_mev_per_A"] for c in data["cycles"] if c.get("test_eval")]
+        f_rmse = [c["test_eval"]["force_rmse_mev_per_A"] / np.sqrt(3.0) for c in data["cycles"] if c.get("test_eval")]
         if len(cycles) > 0:
             ax.plot(cycles, f_rmse, color=ORANGE, linestyle=ls, lw=lw, alpha=alpha, label=f"MACE ({ep} ep)")
 

@@ -28,7 +28,7 @@ BENCHMARK_DIR = Path(__file__).resolve().parent
 try:
     from mace.calculators import MACECalculator
     from mace import data, tools
-    from mace.tools import torch_geometric
+    from mace.tools.torch_geometric.dataloader import DataLoader
 except ImportError:
     pass
 
@@ -162,8 +162,9 @@ def main():
         model = torch.load(str(current_model_path), map_location=args.device)
     model.to(args.device)
 
-    # Atomic numbers table: H(1), O(8), Si(14)
     z_table = tools.AtomicNumberTable([1, 8, 14])
+    keyspec = data.KeySpecification(info_keys={"energy": "REF_energy"}, arrays_keys={"forces": "REF_forces"})
+    model_dtype = next(model.parameters()).dtype
 
     for cycle_idx in range(1, num_cycles + 1):
         c_start = time.time()
@@ -174,9 +175,13 @@ def main():
         print(f"\n--- [Cycle {cycle_idx:02d}/{num_cycles}] Appended AL Point #{cycle_idx} (Total pool: {len(current_train_pool)} frames) ---")
 
         # Convert atoms to MACE AtomicData batches
-        data_loader = torch_geometric.dataloader.DataLoader(
+        data_loader = DataLoader(
             dataset=[
-                data.AtomicData.from_config(at, z_table=z_table, cutoff=5.0)
+                data.AtomicData.from_config(
+                    data.config_from_atoms(at, key_specification=keyspec),
+                    z_table=z_table,
+                    cutoff=5.0,
+                )
                 for at in current_train_pool
             ],
             batch_size=args.batch_size,
@@ -193,12 +198,12 @@ def main():
             for batch in data_loader:
                 batch = batch.to(args.device)
                 optimizer.zero_grad()
-                out = model(batch.to_dict(), compute_force=True)
+                out = model(batch.to_dict(), compute_force=True, training=True)
 
                 # Loss: energy (weight 1.0) + force (weight 100.0)
-                e_true = batch.energy
-                e_pred = out["energy"]
-                f_true = batch.forces
+                e_true = batch.energy.view(-1).to(model_dtype)
+                e_pred = out["energy"].view(-1)
+                f_true = batch.forces.to(model_dtype)
                 f_pred = out["forces"]
 
                 loss_e = torch.mean((e_pred - e_true) ** 2)
@@ -248,9 +253,13 @@ def main():
         print(f"\n>>> Running Post-AL Final Convergence Session ({args.conv_epochs} epochs)...")
         conv_start = time.time()
 
-        conv_loader = torch_geometric.dataloader.DataLoader(
+        conv_loader = DataLoader(
             dataset=[
-                data.AtomicData.from_config(at, z_table=z_table, cutoff=5.0)
+                data.AtomicData.from_config(
+                    data.config_from_atoms(at, key_specification=keyspec),
+                    z_table=z_table,
+                    cutoff=5.0,
+                )
                 for at in current_train_pool
             ],
             batch_size=args.batch_size,
@@ -268,10 +277,15 @@ def main():
             for batch in conv_loader:
                 batch = batch.to(args.device)
                 optimizer.zero_grad()
-                out = model(batch.to_dict(), compute_force=True)
+                out = model(batch.to_dict(), compute_force=True, training=True)
 
-                loss_e = torch.mean((out["energy"] - batch.energy) ** 2)
-                loss_f = torch.mean((out["forces"] - batch.forces) ** 2)
+                e_true = batch.energy.view(-1).to(model_dtype)
+                e_pred = out["energy"].view(-1)
+                f_true = batch.forces.to(model_dtype)
+                f_pred = out["forces"]
+
+                loss_e = torch.mean((e_pred - e_true) ** 2)
+                loss_f = torch.mean((f_pred - f_true) ** 2)
                 total_loss = loss_e + 100.0 * loss_f
 
                 total_loss.backward()

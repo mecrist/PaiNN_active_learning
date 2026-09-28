@@ -37,7 +37,7 @@ MACE_AL_OUT = MACE_AL_DIR / "mace_al_5A_162797.out"
 PAINN_AL_OUT = PAINN_AL_DIR / "painn_al_parsl_163735.out"
 PAINN_CKPT_JSON = PAINN_AL_DIR / "al_checkpoint.json"
 FIG_DIR = BASE_DIR / "comparison_figures"
-ARTIFACTS_DIR = Path("/home/maria.crist/.gemini/antigravity-cli/brain/3835c7a3-3ac2-4b9e-abbb-83143e219d97")
+ARTIFACTS_DIR = Path("/home/maria.crist/.gemini/antigravity-cli/brain/3f8d84ec-8823-4a0a-b7bb-7a1304e9c582")
 
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -152,7 +152,7 @@ def generate_figure1_mace():
     col_title(ax_th, "Adaptive Uncertainty Threshold & Queries (MACE)")
     ax_th.set_xlabel("Acquisition Trigger Event Index")
     ax_th.set_ylabel("Force Uncertainty (meV/Å)")
-    line_th = ax_th.plot(mace_trig_idx, mace_th, color=ORANGE, lw=1.8, label="Dynamic Threshold $\\tau$")
+    line_th = ax_th.step(mace_trig_idx, mace_th, where="mid", color=ORANGE, lw=1.8, label="Dynamic Threshold $\\tau$")
     ax_th.scatter(mace_trig_idx, mace_u, color=INK, marker="x", s=50, lw=1.8, zorder=5, label="Trigger Queries ($U > \\tau$)")
     style_axes(ax_th)
     ax_th.legend(loc="upper right", frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5)
@@ -215,7 +215,7 @@ def generate_figure1_painn():
     col_title(ax_th, "Adaptive Uncertainty Threshold & Queries (PaiNN)")
     ax_th.set_xlabel("Acquisition Trigger Event Index")
     ax_th.set_ylabel("Force Uncertainty (meV/Å)")
-    line_th = ax_th.plot(painn_trig_idx, painn_th, color=PURPLE, lw=1.8, label=r"Dynamic Threshold $\tau$")
+    line_th = ax_th.step(painn_trig_idx, painn_th, where="mid", color=PURPLE, lw=1.8, label=r"Dynamic Threshold $\tau$")
     ax_th.scatter(painn_trig_idx, painn_u, color=INK, marker="x", s=50, lw=1.8, zorder=5, label=r"Trigger Queries ($U > \tau$)")
     style_axes(ax_th)
     ax_th.legend(loc="upper left", frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5)
