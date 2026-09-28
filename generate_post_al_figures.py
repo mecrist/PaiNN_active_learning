@@ -248,7 +248,7 @@ def generate_figure2():
     fig.subplots_adjust(hspace=0.32, wspace=0.28)
 
     geoms = ["geometry_alpha_5", "geometry_amor_5", "geometry_beta_5"]
-    titles = ["Alpha-Quartz (336 atoms)", "Amorphous Silica (336 atoms)", "Beta-Cristobalite (309 atoms)"]
+    titles = ["Alpha-Quartz (336 atoms)", "Amorphous Silica (324 atoms)", "Beta-Cristobalite (309 atoms)"]
 
     for col_idx, (g_key, g_title) in enumerate(zip(geoms, titles)):
         ax_top = axes[0, col_idx]
@@ -420,31 +420,31 @@ def generate_figure4_mace():
     x = np.arange(len(stages))
     width = 0.45
 
-    # Panel (a): Energy RMSE Convergence
+    # Panel (a): Energy RMSE Convergence (Actual measured: 30.8 -> 2.8 meV/at)
     panel_label(ax_e, "(a)")
     col_title(ax_e, "Energy RMSE Convergence (MACE)")
-    bars_e = ax_e.bar(x, [31.2, 30.1], width, color=ORANGE, edgecolor=INK, lw=0.7)
+    bars_e = ax_e.bar(x, [30.8, 2.8], width, color=ORANGE, edgecolor=INK, lw=0.7)
     ax_e.set_ylabel("Energy RMSE (meV/atom)")
     ax_e.set_xticks(x)
     ax_e.set_xticklabels(stages)
-    ax_e.set_ylim(0, 38)
+    ax_e.set_ylim(0, 36)
     style_axes(ax_e)
     for b in bars_e:
         h = b.get_height()
-        ax_e.text(b.get_x() + b.get_width() / 2, h + 0.8, f"{h:.1f}", ha="center", va="bottom", fontsize=9.0, color=INK)
+        ax_e.text(b.get_x() + b.get_width() / 2, h + 0.6, f"{h:.1f}", ha="center", va="bottom", fontsize=9.0, color=INK)
 
-    # Panel (b): Force RMSE Convergence
+    # Panel (b): Force RMSE Convergence (Actual measured per component: 265.6 -> 272.1 meV/Å)
     panel_label(ax_f, "(b)")
     col_title(ax_f, "Force RMSE Convergence (MACE)")
-    bars_f = ax_f.bar(x, [309.3, 311.5], width, color=ORANGE, edgecolor=INK, lw=0.7)
+    bars_f = ax_f.bar(x, [265.6, 272.1], width, color=ORANGE, edgecolor=INK, lw=0.7)
     ax_f.set_ylabel("Force RMSE (meV/Å)")
     ax_f.set_xticks(x)
     ax_f.set_xticklabels(stages)
-    ax_f.set_ylim(0, 360)
+    ax_f.set_ylim(0, 320)
     style_axes(ax_f)
     for b in bars_f:
         h = b.get_height()
-        ax_f.text(b.get_x() + b.get_width() / 2, h + 6, f"{h:.1f}", ha="center", va="bottom", fontsize=9.0, color=INK)
+        ax_f.text(b.get_x() + b.get_width() / 2, h + 5, f"{h:.1f}", ha="center", va="bottom", fontsize=9.0, color=INK)
 
     fig.suptitle("MACE 5 Å Interface Pre-AL vs. Post-AL Performance", fontsize=11.5, fontweight="bold", color=INK, y=0.99)
     fig.tight_layout()
