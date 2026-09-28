@@ -324,3 +324,6 @@ def run_final_convergence(
             torch.save(model, str(best_path))
 
     print("[FINAL CONVERGENCE] Complete. Converged models saved to:", out_dir)
+
+
+retrain_ensemble = retrain_painn_ensemble

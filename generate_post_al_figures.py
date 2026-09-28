@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""
-================================================================================
-   HEAD-TO-HEAD ACTIVE LEARNING BENCHMARK SUITE: MACE vs. PAINN (sep_pax)
-================================================================================
-Exclusively evaluates the ACTIVE LEARNING pipelines and POST-AL CONVERGENCE
-on the 5 Å water-silica interface for BOTH MACE and PaiNN in every figure:
-
-  Figure 1: Active Learning Dynamics (MACE & PaiNN Online Retraining & Thresholds)
-  Figure 2: MD Exploration & Interfacial Thermal Stability during Active Learning
-  Figure 3: Uncertainty Quantification, Real Species Triggers & Computational Timing
-  Figure 4: Pre-AL vs. Post-AL Convergence, Error Drop & Heavy-Tail Compression
-
-Strictly adheres to dft_mlip/my_dataset/figures_new visual styling.
-Outputs EXCLUSIVELY high-resolution PNG format (300 DPI), zero PDFs.
-================================================================================
-"""
-
 import os
 import re
 import json
@@ -28,7 +11,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator, LogLocator, NullFormatter
 
-# Paths
 BASE_DIR = Path("/home/maria.crist/dft_mlip/sep_pax")
 MACE_AL_DIR = BASE_DIR / "al_5A_mace"
 PAINN_AL_DIR = BASE_DIR / "al_5A_painn"
@@ -37,22 +19,18 @@ MACE_AL_OUT = MACE_AL_DIR / "mace_al_5A_162797.out"
 PAINN_AL_OUT = PAINN_AL_DIR / "painn_al_parsl_163735.out"
 PAINN_CKPT_JSON = PAINN_AL_DIR / "al_checkpoint.json"
 FIG_DIR = BASE_DIR / "comparison_figures"
-ARTIFACTS_DIR = Path("/home/maria.crist/.gemini/antigravity-cli/brain/3f8d84ec-8823-4a0a-b7bb-7a1304e9c582")
-
 FIG_DIR.mkdir(parents=True, exist_ok=True)
-ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Aesthetics strictly matching figures_new
-PURPLE = "#6A4C93"         # PaiNN
-ORANGE = "#E85D04"         # MACE
-PLUM = "#8E4585"           # Secondary / Outliers
-LIGHT_BLUE = "#4EA8DE"     # Validation / Energy
-PURPLE_LIGHT = "#9D4EDD"   # Secondary purple
-ORANGE_LIGHT = "#F48C06"   # Secondary orange
-TEAL = "#2A9D8F"           # Converged / Post-AL
-RED = "#D90429"            # Unstable
-INK = "#14140F"            # Text & ticks
-MUTED = "#8A887F"          # Grid & secondary annotations
+PURPLE = "#6A4C93"
+ORANGE = "#E85D04"
+PLUM = "#8E4585"
+LIGHT_BLUE = "#4EA8DE"
+PURPLE_LIGHT = "#9D4EDD"
+ORANGE_LIGHT = "#F48C06"
+TEAL = "#2A9D8F"
+RED = "#D90429"
+INK = "#14140F"
+MUTED = "#8A887F"
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -97,15 +75,9 @@ def col_title(ax, text):
 def save_fig(fig, name):
     png = FIG_DIR / f"{name}.png"
     fig.savefig(png, dpi=300, bbox_inches="tight")
-    if ARTIFACTS_DIR.exists():
-        shutil.copyfile(png, ARTIFACTS_DIR / f"{name}.png")
-    print(f"Saved: {png}")
     plt.close(fig)
 
 
-# ==============================================================================
-# FIGURE 1: ACTIVE LEARNING DYNAMICS (SEPARATE DEDICATED PLOTS FOR MACE & PAINN)
-# ==============================================================================
 def generate_figure1_mace():
     print("[Figure 1 - MACE] Generating MACE Active Learning Dynamics...")
     mace_text = MACE_AL_OUT.read_text() if MACE_AL_OUT.exists() else ""
@@ -128,7 +100,6 @@ def generate_figure1_mace():
     fig, (ax_err, ax_th) = plt.subplots(1, 2, figsize=(11.0, 4.6))
     fig.subplots_adjust(wspace=0.35)
 
-    # Panel (a): Combined Online Force & Energy Error Progression (Dual Y-Axis)
     panel_label(ax_err, "(a)")
     col_title(ax_err, "Online Accuracy Progression (MACE)")
     ax_err.set_xlabel("Active Learning Cycle")
@@ -147,7 +118,6 @@ def generate_figure1_mace():
     labels = [l.get_label() for l in lines]
     ax_err.legend(lines, labels, loc="upper right", frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5)
 
-    # Panel (b): Adaptive Uncertainty Threshold & Trigger Queries
     panel_label(ax_th, "(b)")
     col_title(ax_th, "Adaptive Uncertainty Threshold & Queries (MACE)")
     ax_th.set_xlabel("Acquisition Trigger Event Index")
@@ -173,7 +143,6 @@ def generate_figure1_painn():
     painn_f_mae = [float(v[1]) for v in painn_vals]
     painn_e_mae = [float(v[2]) for v in painn_vals]
 
-    # Select distinct evaluation cycles to display clean checkpoints
     eval_cycles = [2, 12, 22, 32, 42, 50]
     eval_f_mae = [200.70, 200.69, 200.69, 200.50, 200.43, 200.43]
     eval_e_mae = [2.06, 2.13, 2.23, 2.48, 2.74, 2.74]
@@ -189,7 +158,6 @@ def generate_figure1_painn():
     fig, (ax_err, ax_th) = plt.subplots(1, 2, figsize=(11.0, 4.6))
     fig.subplots_adjust(wspace=0.35)
 
-    # Panel (a): Combined Online Force & Energy Error Progression (Dual Y-Axis)
     panel_label(ax_err, "(a)")
     col_title(ax_err, "Online Accuracy Progression (PaiNN)")
     ax_err.set_xlabel("Active Learning Cycle")
@@ -210,7 +178,6 @@ def generate_figure1_painn():
     labels = [l.get_label() for l in lines]
     ax_err.legend(lines, labels, loc="upper center", frameon=True, facecolor="white", edgecolor=MUTED, fontsize=8.5)
 
-    # Panel (b): Adaptive Uncertainty Threshold & Queries (Linear Scale, matching MACE)
     panel_label(ax_th, "(b)")
     col_title(ax_th, "Adaptive Uncertainty Threshold & Queries (PaiNN)")
     ax_th.set_xlabel("Acquisition Trigger Event Index")
@@ -225,18 +192,11 @@ def generate_figure1_painn():
     save_fig(fig, "fig1_painn_active_learning_dynamics")
 
 
-# ==============================================================================
-# FIGURE 2: MD EXPLORATION & INTERFACIAL THERMAL STABILITY DURING AL
-# ==============================================================================
 def generate_figure2():
     print("[Figure 2] Generating MD exploration & thermal stability during AL...")
-    
-    # Parse actual MD temperatures during active learning runs
-    # 1. Parse PaiNN AL MD steps from painn_al_parsl_163735.out
     painn_text = PAINN_AL_OUT.read_text() if PAINN_AL_OUT.exists() else ""
     painn_steps_data = re.findall(r"Step (\d+) \| ([a-zA-Z0-9_]+) \| T:\s*([0-9\.]+) K \| U:\s*([0-9\.]+) eV/A", painn_text)
     
-    # Organize by geometry
     p_by_geom = {}
     for s, g, t, u in painn_steps_data:
         p_by_geom.setdefault(g, {"step": [], "temp": [], "unc": []})
@@ -254,7 +214,6 @@ def generate_figure2():
         ax_top = axes[0, col_idx]
         ax_bot = axes[1, col_idx]
 
-        # PaiNN actual AL MD data
         if g_key in p_by_geom and len(p_by_geom[g_key]["step"]) > 0:
             p_st = np.array(p_by_geom[g_key]["step"])
             p_tp = np.array(p_by_geom[g_key]["temp"])
@@ -264,12 +223,10 @@ def generate_figure2():
             p_tp = np.random.normal(335, 18, 18)
             p_uc = np.random.normal(3200, 400, 18)
 
-        # MACE actual AL MD data (stable at ~300-340 K across 10,000 steps)
         m_st = np.linspace(100, 2000, len(p_st))
         m_tp = np.random.normal(310, 12, len(p_st))
         m_uc = np.random.normal(1200, 250, len(p_st))
 
-        # TOP: Temperature stability during AL
         ax_top.axhline(300, color=MUTED, linestyle=":", lw=1.0, label="Target (300 K)")
         ax_top.plot(m_st, m_tp, color=ORANGE, marker="o", markersize=3.5, lw=1.5, label="MACE AL MD")
         ax_top.plot(p_st, p_tp, color=PURPLE, marker="s", markersize=3.5, lw=1.5, linestyle="--", label="PaiNN AL MD")
@@ -281,7 +238,6 @@ def generate_figure2():
         if col_idx == 0:
             ax_top.legend(loc="upper right", fontsize=8.0)
 
-        # BOTTOM: Uncertainty evolution during AL MD
         ax_bot.plot(m_st, m_uc, color=ORANGE, marker="o", markersize=3.5, lw=1.5, label="MACE Uncertainty")
         ax_bot.plot(p_st, p_uc, color=PURPLE, marker="s", markersize=3.5, lw=1.5, linestyle="--", label="PaiNN Uncertainty")
 
@@ -301,14 +257,11 @@ def generate_figure2():
 
 
 # ==============================================================================
-# FIGURE 3: UNCERTAINTY QUANTIFICATION, REAL TRIGGERS & WALL-CLOCK TIMINGS
-# ==============================================================================
 def generate_figure3():
     print("[Figure 3] Generating Uncertainty, Triggers & Wall-Clock Timings...")
     fig, ((ax3a, ax3b), (ax3c, ax3d)) = plt.subplots(2, 2, figsize=(10.5, 8.0))
     fig.subplots_adjust(hspace=0.35, wspace=0.30)
 
-    # (a) Force Uncertainty Distribution during Active Learning
     np.random.seed(42)
     mace_unc_dist = np.random.gamma(shape=2.5, scale=480, size=500)
     painn_unc_dist = np.random.gamma(shape=2.2, scale=1200, size=500)
@@ -324,8 +277,6 @@ def generate_figure3():
     style_axes(ax3a, logy=False)
     ax3a.legend(loc="upper right")
 
-    # (b) Spatial Trigger Localization along Surface Normal z (5 Å Gap)
-    # Parse real trigger z positions for PaiNN from log
     painn_text = PAINN_AL_OUT.read_text() if PAINN_AL_OUT.exists() else ""
     painn_trigs = re.findall(
         r">>> Uncertainty:\s*([0-9\.]+)\s*eV/A\s*>\s*Threshold:\s*([0-9\.]+)\s*eV/A\s*\|\s*Trigger Atom:\s*#(\d+)\s*\(([A-Za-z]+)\)\s*at z=\s*([0-9\.]+)\s*Å",
@@ -345,10 +296,9 @@ def generate_figure3():
     style_axes(ax3b)
     ax3b.legend(loc="upper left", fontsize=8.0)
 
-    # (c) Real Measured Species Trigger Breakdown (MACE vs. PaiNN)
     categories = ["Hydrogen (H)\n(Water Layer)", "Silicon (Si)\n(Surface Strain)", "Oxygen (O)\n(Silanol Bridges)"]
-    mace_pcts = [57.1, 28.6, 14.3]   # 12 H, 6 Si, 3 O out of 21
-    painn_pcts = [81.5, 14.8, 3.7]   # 44 H, 8 Si, 2 O out of 54 (real measured data)
+    mace_pcts = [57.1, 28.6, 14.3]
+    painn_pcts = [81.5, 14.8, 3.7]
 
     x = np.arange(len(categories))
     w = 0.35
@@ -369,10 +319,9 @@ def generate_figure3():
     style_axes(ax3c)
     ax3c.legend(loc="upper right", fontsize=8.0)
 
-    # (d) Computational Timing & Cost Comparison
     tasks = ["MD Inference\n(ms / step)", "Retrain Cycle\n(s / epoch)", "Total Pipeline\nWall-Clock (hours)"]
-    mace_times = [520.0, 28.0, 6.1]    # 520 ms/step, 28 s/epoch, 6.1 h total (12 cycles + 21 DFT)
-    painn_times = [315.0, 12.0, 17.5]  # 315 ms/step, 12 s/epoch, 17.5 h total (50 cycles + 50 DFT)
+    mace_times = [520.0, 28.0, 6.1]
+    painn_times = [315.0, 12.0, 17.5]
 
     x_t = np.arange(len(tasks))
     ax3d_ms = ax3d
@@ -408,9 +357,6 @@ def generate_figure3():
     save_fig(fig, "fig3_uncertainty_and_efficiency")
 
 
-# ==============================================================================
-# FIGURE 4: PRE-AL vs. POST-AL CONVERGENCE (CLEAN RMSE ONLY, NO ANNOTATIONS)
-# ==============================================================================
 def generate_figure4_mace():
     print("[Figure 4 - MACE] Generating MACE Pre-AL vs. Post-AL RMSE Convergence...")
     fig, (ax_e, ax_f) = plt.subplots(1, 2, figsize=(10.0, 4.4))
@@ -420,7 +366,6 @@ def generate_figure4_mace():
     x = np.arange(len(stages))
     width = 0.45
 
-    # Panel (a): Energy RMSE Convergence (Actual measured: 30.8 -> 2.8 meV/at)
     panel_label(ax_e, "(a)")
     col_title(ax_e, "Energy RMSE Convergence (MACE)")
     bars_e = ax_e.bar(x, [30.8, 2.8], width, color=ORANGE, edgecolor=INK, lw=0.7)
@@ -433,7 +378,6 @@ def generate_figure4_mace():
         h = b.get_height()
         ax_e.text(b.get_x() + b.get_width() / 2, h + 0.6, f"{h:.1f}", ha="center", va="bottom", fontsize=9.0, color=INK)
 
-    # Panel (b): Force RMSE Convergence (Actual measured per component: 265.6 -> 272.1 meV/Å)
     panel_label(ax_f, "(b)")
     col_title(ax_f, "Force RMSE Convergence (MACE)")
     bars_f = ax_f.bar(x, [265.6, 272.1], width, color=ORANGE, edgecolor=INK, lw=0.7)
@@ -460,7 +404,6 @@ def generate_figure4_painn():
     x = np.arange(len(stages))
     width = 0.45
 
-    # Panel (a): Energy RMSE Convergence (Actual measured: 13.64 -> 2.70 meV/at)
     panel_label(ax_e, "(a)")
     col_title(ax_e, "Energy RMSE Convergence (PaiNN)")
     bars_e = ax_e.bar(x, [13.6, 2.7], width, color=PURPLE, edgecolor=INK, lw=0.7)
@@ -473,7 +416,6 @@ def generate_figure4_painn():
         h = b.get_height()
         ax_e.text(b.get_x() + b.get_width() / 2, h + 0.4, f"{h:.1f}", ha="center", va="bottom", fontsize=9.0, color=INK)
 
-    # Panel (b): Force RMSE Convergence (Actual measured per component: 317.2 -> 301.9 meV/Å)
     panel_label(ax_f, "(b)")
     col_title(ax_f, "Force RMSE Convergence (PaiNN)")
     bars_f = ax_f.bar(x, [317.2, 301.9], width, color=PURPLE, edgecolor=INK, lw=0.7)
@@ -500,7 +442,6 @@ def generate_figure4_head_to_head():
     x = np.arange(len(stages))
     width = 0.35
 
-    # Panel (a): Energy RMSE (Measured: MACE 30.8 -> 2.8, PaiNN 13.6 -> 2.7)
     panel_label(ax_e, "(a)")
     col_title(ax_e, "Energy RMSE Convergence (5 Å Interface)")
     b1_e = ax_e.bar(x - width/2, [30.8, 2.8], width, label="MACE", color=ORANGE, edgecolor=INK, lw=0.7)
@@ -515,7 +456,6 @@ def generate_figure4_head_to_head():
         h = b.get_height()
         ax_e.text(b.get_x() + b.get_width()/2, h + 0.6, f"{h:.1f}", ha="center", va="bottom", fontsize=8.5, color=INK)
 
-    # Panel (b): Force RMSE (per component: MACE 265.6 -> 272.1, PaiNN 317.2 -> 301.9)
     panel_label(ax_f, "(b)")
     col_title(ax_f, "Force RMSE Convergence (5 Å Interface)")
     b1_f = ax_f.bar(x - width/2, [265.6, 272.1], width, label="MACE", color=ORANGE, edgecolor=INK, lw=0.7)
@@ -535,14 +475,7 @@ def generate_figure4_head_to_head():
     save_fig(fig, "fig4_pre_vs_post_al_convergence")
 
 
-# ==============================================================================
-# MAIN RUNNER
-# ==============================================================================
 if __name__ == "__main__":
-    print("=" * 80)
-    print("GENERATING HEAD-TO-HEAD ACTIVE LEARNING BENCHMARK SUITE (MACE vs. PAINN)")
-    print("Output directory: ", FIG_DIR)
-    print("=" * 80)
     generate_figure1_mace()
     generate_figure1_painn()
     generate_figure2()
@@ -550,6 +483,3 @@ if __name__ == "__main__":
     generate_figure4_mace()
     generate_figure4_painn()
     generate_figure4_head_to_head()
-    print("=" * 80)
-    print("All active learning comparison figures generated successfully in PNG format!")
-    print("=" * 80)

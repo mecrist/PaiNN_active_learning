@@ -4,12 +4,14 @@ Recovery script to ingest converged FHI-aims calculations from failed_calculatio
 into the active learning training and validation datasets.
 """
 
+import sys
 from pathlib import Path
+import json
 import numpy as np
 from ase.io import read, write
-import json
 
-from dft_interface import parse_hirshfeld_data
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from aims_PAX.tools.utilities.dft_interface import parse_hirshfeld_data
 
 
 def recover():

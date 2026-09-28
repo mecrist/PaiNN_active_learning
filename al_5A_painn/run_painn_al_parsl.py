@@ -1,19 +1,8 @@
-#!/usr/bin/env python
-"""
-================================================================================
-   PAINN CLOSED-LOOP ACTIVE LEARNING WITH PARSL (5 ANGSTROM WATER GAP)
-================================================================================
-Entry point for the closed-loop active learning workflow using aims_PAX procedures.
-Configures ALConfiguration and executes ALProcedurePARSL.
-================================================================================
-"""
-
 import sys
 from pathlib import Path
 from ase import units
 import torch
 
-# Ensure aims_PAX package is accessible
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 

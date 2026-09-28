@@ -1,28 +1,6 @@
 #!/usr/bin/env python
 """
-================================================================================
-   PAINN CLOSED-LOOP ACTIVE LEARNING PIPELINE: 5 ANGSTROM WATER GAP (3 SYSTEMS)
-================================================================================
-Drives closed-loop active learning on the 3 silica-water interfaces with 5 A gap:
-  1. geometry_alpha_5.in  (Alpha-quartz + 5 A water layer)
-  2. geometry_amor_5.in   (Amorphous silica + 5 A water layer)
-  3. geometry_beta_5.in   (Beta-cristobalite + 5 A water layer)
-
-Full Closed Loop:
-  - 3 fine-tuned PaiNN models (mine/model_2_ep500)
-  - MD at 300 K (ASE Langevin, dt=0.5 fs)
-  - Uncertainty metric: U = max_i sigma_i (force standard deviation)
-  - Threshold: U_thresh = 25.0 meV/A with dynamic relaxation
-  - On trigger (U > U_thresh):
-      1. Halts MD & archives structure in dft_calculations/
-      2. Executes local 32-core FHI-aims single point (mpirun -np 32 aims.x)
-      3. Shifts raw DFT energy with atomic baseline E0
-      4. Appends to al_dataset.xyz
-      5. Retrains 3 PaiNN committee members for 1 epoch
-      6. Reloads weights and resumes MD
-  - Dumps: unified LAMMPS dump every 1,000 steps; virial stress dump every 5,000 steps
-  - State tracking: al_checkpoint.json
-================================================================================
+PaiNN closed-loop active learning pipeline for 5 Angstrom water gap silica systems.
 """
 
 import os
@@ -41,10 +19,13 @@ from ase.io import read, write
 from ase.md.langevin import Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 
-from painn_ensemble_calc import PainnEnsembleCalculator, KCAL_TO_EV
-from lammps_dumps import write_lammps_dump, identify_molecules
-from dft_interface import run_aims_single_point, AimsCalculationError
-from retrain_engine import retrain_ensemble, run_final_convergence
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from aims_PAX.tools.model_tools.setup_painn import PainnEnsembleCalculator, KCAL_TO_EV
+from aims_PAX.tools.utilities.lammps_dumps import write_lammps_dump, identify_molecules
+from aims_PAX.tools.utilities.dft_interface import run_aims_single_point, AimsCalculationError
+from aims_PAX.tools.model_tools.train_painn import retrain_ensemble, run_final_convergence
 
 
 class AimsPaxThresholdManager:

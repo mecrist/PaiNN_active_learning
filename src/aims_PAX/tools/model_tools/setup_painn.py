@@ -117,14 +117,14 @@ class PainnEnsembleCalculator(Calculator):
         mean_energy = float(np.mean(energies_ev)) + e0_total
         mean_forces = np.mean(forces_ev_ang, axis=0)  # (N, 3)
 
-        # Force standard deviation across committee following aims-PAX exactly (in eV/A)
+        # Force standard deviation across committee following aims-PAX (in eV/A)
         pred_av = np.average(forces_ev_ang, axis=0, keepdims=True)
         diff_sq = (forces_ev_ang - pred_av) ** 2.0
         diff_sq_mean = np.mean(diff_sq, axis=(0, -1))
         std_per_atom = np.sqrt(diff_sq_mean)
         max_atomic_sd = float(np.max(std_per_atom))
 
-        # Atomic stress proxy (uncalibrated diagnostic)
+        # Atomic stress proxy
         pos_diag = self.atoms.get_positions(wrap=True) if any(self.atoms.get_pbc()) else self.atoms.get_positions()
         pos_rel = pos_diag - np.mean(pos_diag, axis=0)
         atomic_virial = - pos_rel * mean_forces

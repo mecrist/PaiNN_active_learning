@@ -84,9 +84,7 @@ class ALProcedurePARSL(PrepareALProcedure):
         print("==========================================================\n")
 
         while self.state_manager.step < self.config.max_md_steps:
-            # ------------------------------------------------------------------
             # Phase 1: Poll Parsl background futures for completed DFT calculations
-            # ------------------------------------------------------------------
             for i, t in enumerate(self.trajectories):
                 if t["status"] == "waiting" and t["future"] is not None:
                     if t["future"].done():
@@ -139,17 +137,13 @@ class ALProcedurePARSL(PrepareALProcedure):
                 break
 
 
-            # ------------------------------------------------------------------
             # Phase 2: Check if all unfinished trajectories are currently waiting
-            # ------------------------------------------------------------------
             unfinished = [t for t in self.trajectories if t["step"] < self.config.max_md_steps]
             if len(unfinished) > 0 and all(t["status"] == "waiting" for t in unfinished):
                 time.sleep(1.0)
                 continue
 
-            # ------------------------------------------------------------------
             # Phase 3: Propagate running trajectories on GPU
-            # ------------------------------------------------------------------
             self.run_manager.step_trajectories(on_trigger_callback=self._on_trigger)
 
             # Checkpoint every 500 steps
@@ -159,9 +153,7 @@ class ALProcedurePARSL(PrepareALProcedure):
                     current_model_dirs=self.ensemble.current_model_dirs,
                 )
 
-        # ------------------------------------------------------------------
         # Shutdown and final convergence
-        # ------------------------------------------------------------------
         try:
             parsl.dfk().cleanup()
         except Exception:

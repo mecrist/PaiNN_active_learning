@@ -22,14 +22,22 @@ BENCHMARK_DIR = Path("/home/maria.crist/dft_mlip/sep_pax/benchmark_al_epochs")
 OUT_DIR = BENCHMARK_DIR / "figures"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Styling palette matching figures_new
-PURPLE = "#6A4C93"         # PaiNN
-ORANGE = "#E85D04"         # MACE
-TEAL = "#2A9D8F"           # Accent / Converged
-RED = "#D90429"            # Overfitting / Outliers
-LIGHT_BLUE = "#4EA8DE"     # Secondary
-INK = "#14140F"            # Text & ticks
-MUTED = "#8A887F"          # Subtle lines
+INK = "#14140F"
+MUTED = "#8A887F"
+
+PAINN_COLORS = {
+    2: "#2E5BFF",
+    3: "#7B2CBF",
+    5: "#0096C7",
+    10: "#B5179E",
+}
+
+MACE_COLORS = {
+    2: "#F77F00",
+    3: "#D62828",
+    5: "#9D0208",
+    10: "#6A040F",
+}
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -71,22 +79,20 @@ def panel_label(ax, letter):
 def col_title(ax, text):
     ax.set_title(text, fontsize=10.5, fontweight="medium", color=INK, pad=8)
 
-
 def load_metrics(pattern):
     results = {}
     for d in sorted(BENCHMARK_DIR.glob(pattern)):
         m_file = d / "replay_metrics.json"
         if m_file.exists():
             with open(m_file, "r") as f:
-                results[d.name] = json.load(f)
-    return results
-
+                data = json.load(f)
+            ep = data.get("config", {}).get("epochs_per_cycle", 0)
+            results[(ep, d.name)] = data
+    return dict(sorted(results.items(), key=lambda kv: kv[0][0]))
 
 def main():
     painn_results = load_metrics("results_painn_*")
     mace_results = load_metrics("results_mace_*")
-
-    print(f"Loaded {len(painn_results)} PaiNN benchmark runs, {len(mace_results)} MACE benchmark runs.")
 
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.0))
     fig.subplots_adjust(hspace=0.35, wspace=0.30)
@@ -99,30 +105,19 @@ def main():
     ax.set_xlabel("Active Learning Cycle (Unified Pool)")
     ax.set_ylabel("Energy RMSE (meV/atom)")
 
-    epoch_styles = {
-        2: ("-", 1.5, 0.7),
-        3: ("--", 1.6, 0.8),
-        5: ("-.", 1.8, 0.9),
-        10: (":", 2.0, 1.0),
-    }
-
-    # Plot PaiNN curves
-    for name, data in painn_results.items():
-        ep = data["config"]["epochs_per_cycle"]
-        ls, lw, alpha = epoch_styles.get(ep, ("-", 1.5, 0.8))
+    for (ep, name), data in painn_results.items():
+        color = PAINN_COLORS.get(ep, "#6A4C93")
         cycles = [c["cycle"] for c in data["cycles"] if c.get("test_eval")]
         e_rmse = [c["test_eval"]["energy_rmse_mev_per_atom"] for c in data["cycles"] if c.get("test_eval")]
         if len(cycles) > 0:
-            ax.plot(cycles, e_rmse, color=PURPLE, linestyle=ls, lw=lw, alpha=alpha, label=f"PaiNN ({ep} ep/cycle)")
+            ax.plot(cycles, e_rmse, color=color, linestyle="-", lw=1.8, label=f"PaiNN ({ep} ep/cycle)")
 
-    # Plot MACE curves
-    for name, data in mace_results.items():
-        ep = data["config"]["epochs_per_cycle"]
-        ls, lw, alpha = epoch_styles.get(ep, ("-", 1.5, 0.8))
+    for (ep, name), data in mace_results.items():
+        color = MACE_COLORS.get(ep, "#E85D04")
         cycles = [c["cycle"] for c in data["cycles"] if c.get("test_eval")]
         e_rmse = [c["test_eval"]["energy_rmse_mev_per_atom"] for c in data["cycles"] if c.get("test_eval")]
         if len(cycles) > 0:
-            ax.plot(cycles, e_rmse, color=ORANGE, linestyle=ls, lw=lw, alpha=alpha, label=f"MACE ({ep} ep/cycle)")
+            ax.plot(cycles, e_rmse, color=color, linestyle="--", lw=1.8, label=f"MACE ({ep} ep/cycle)")
 
     ax.legend(loc="upper right", fontsize=8.0, frameon=True, facecolor="white", edgecolor=MUTED)
 
@@ -134,22 +129,19 @@ def main():
     ax.set_xlabel("Active Learning Cycle (Unified Pool)")
     ax.set_ylabel("Force RMSE per Component (meV/Å)")
 
-    # Standardize to per-component RMSE (RMSE_vector / sqrt(3)) to match literature & Figure 4
-    for name, data in painn_results.items():
-        ep = data["config"]["epochs_per_cycle"]
-        ls, lw, alpha = epoch_styles.get(ep, ("-", 1.5, 0.8))
+    for (ep, name), data in painn_results.items():
+        color = PAINN_COLORS.get(ep, "#6A4C93")
         cycles = [c["cycle"] for c in data["cycles"] if c.get("test_eval")]
         f_rmse = [c["test_eval"]["force_rmse_mev_per_A"] / np.sqrt(3.0) for c in data["cycles"] if c.get("test_eval")]
         if len(cycles) > 0:
-            ax.plot(cycles, f_rmse, color=PURPLE, linestyle=ls, lw=lw, alpha=alpha, label=f"PaiNN ({ep} ep)")
+            ax.plot(cycles, f_rmse, color=color, linestyle="-", lw=1.8, label=f"PaiNN ({ep} ep)")
 
-    for name, data in mace_results.items():
-        ep = data["config"]["epochs_per_cycle"]
-        ls, lw, alpha = epoch_styles.get(ep, ("-", 1.5, 0.8))
+    for (ep, name), data in mace_results.items():
+        color = MACE_COLORS.get(ep, "#E85D04")
         cycles = [c["cycle"] for c in data["cycles"] if c.get("test_eval")]
         f_rmse = [c["test_eval"]["force_rmse_mev_per_A"] / np.sqrt(3.0) for c in data["cycles"] if c.get("test_eval")]
         if len(cycles) > 0:
-            ax.plot(cycles, f_rmse, color=ORANGE, linestyle=ls, lw=lw, alpha=alpha, label=f"MACE ({ep} ep)")
+            ax.plot(cycles, f_rmse, color=color, linestyle="--", lw=1.8, label=f"MACE ({ep} ep)")
 
     ax.legend(loc="upper right", fontsize=8.0, frameon=True, facecolor="white", edgecolor=MUTED)
 
@@ -169,25 +161,34 @@ def main():
 
     for ep in epochs_list:
         p_val = np.nan
-        for name, data in painn_results.items():
-            if data["config"]["epochs_per_cycle"] == ep and data.get("final_convergence"):
+        for (e_cfg, name), data in painn_results.items():
+            if e_cfg == ep and data.get("final_convergence"):
                 p_val = data["final_convergence"]["energy_rmse_mev_per_atom"]
         painn_conv_e.append(p_val)
 
         m_val = np.nan
-        for name, data in mace_results.items():
-            if data["config"]["epochs_per_cycle"] == ep and data.get("final_convergence"):
+        for (e_cfg, name), data in mace_results.items():
+            if e_cfg == ep and data.get("final_convergence"):
                 m_val = data["final_convergence"]["energy_rmse_mev_per_atom"]
         mace_conv_e.append(m_val)
 
-    b1 = ax.bar(x - width/2, [0 if np.isnan(v) else v for v in painn_conv_e], width, color=PURPLE, label="PaiNN Converged")
-    b2 = ax.bar(x + width/2, [0 if np.isnan(v) else v for v in mace_conv_e], width, color=ORANGE, label="MACE Converged")
+    b1 = ax.bar(x - width/2, [0 if np.isnan(v) else v for v in painn_conv_e], width, color="#6A4C93", label="PaiNN Converged")
+    b2 = ax.bar(x + width/2, [0 if np.isnan(v) else v for v in mace_conv_e], width, color="#E85D04", label="MACE Converged")
+
+    for bar, val in zip(b1, painn_conv_e):
+        if not np.isnan(val) and val > 0:
+            ax.text(bar.get_x() + bar.get_width()/2, val + 0.05, f"{val:.2f}", ha="center", va="bottom", fontsize=8, color=INK)
+
+    for bar, val in zip(b2, mace_conv_e):
+        if not np.isnan(val) and val > 0:
+            ax.text(bar.get_x() + bar.get_width()/2, val + 0.05, f"{val:.2f}", ha="center", va="bottom", fontsize=8, color=INK)
 
     ax.set_xticks(x)
     ax.set_xticklabels([f"{ep} ep/cyc" for ep in epochs_list])
+    ax.set_ylim(0, 3.4)
     ax.legend(loc="upper right", fontsize=8.5, frameon=True, facecolor="white", edgecolor=MUTED)
 
-    # Panel D: Total Computational Overhead vs. Final Error
+    # Panel D: Total Computational Overhead vs. Final Error (Pareto Trade-off)
     ax = axes[1, 1]
     style_axes(ax)
     panel_label(ax, "(d)")
@@ -195,21 +196,21 @@ def main():
     ax.set_xlabel("Total Training Wall-Clock Time (minutes)")
     ax.set_ylabel("Final Converged Energy RMSE (meV/atom)")
 
-    for name, data in painn_results.items():
-        ep = data["config"]["epochs_per_cycle"]
+    for (ep, name), data in painn_results.items():
         if data.get("final_convergence"):
             t_total = sum(c["train_wallclock_sec"] for c in data["cycles"]) + data["final_convergence"]["conv_wallclock_sec"]
             e_final = data["final_convergence"]["energy_rmse_mev_per_atom"]
-            ax.scatter(t_total / 60.0, e_final, color=PURPLE, s=80, marker="o")
-            ax.annotate(f"PaiNN {ep}ep", xy=(t_total / 60.0, e_final), xytext=(5, 5), textcoords="offset points", fontsize=8)
+            color = PAINN_COLORS.get(ep, "#6A4C93")
+            ax.scatter(t_total / 60.0, e_final, color=color, s=80, marker="o", edgecolors=INK, linewidth=0.8, zorder=5)
+            ax.annotate(f"PaiNN {ep}ep", xy=(t_total / 60.0, e_final), xytext=(6, 4), textcoords="offset points", fontsize=8.5, color=color, fontweight="bold")
 
-    for name, data in mace_results.items():
-        ep = data["config"]["epochs_per_cycle"]
+    for (ep, name), data in mace_results.items():
         if data.get("final_convergence"):
             t_total = sum(c["train_wallclock_sec"] for c in data["cycles"]) + data["final_convergence"]["conv_wallclock_sec"]
             e_final = data["final_convergence"]["energy_rmse_mev_per_atom"]
-            ax.scatter(t_total / 60.0, e_final, color=ORANGE, s=80, marker="s")
-            ax.annotate(f"MACE {ep}ep", xy=(t_total / 60.0, e_final), xytext=(5, 5), textcoords="offset points", fontsize=8)
+            color = MACE_COLORS.get(ep, "#E85D04")
+            ax.scatter(t_total / 60.0, e_final, color=color, s=80, marker="o", edgecolors=INK, linewidth=0.8, zorder=5)
+            ax.annotate(f"MACE {ep}ep", xy=(t_total / 60.0, e_final), xytext=(6, 4), textcoords="offset points", fontsize=8.5, color=color, fontweight="bold")
 
     out_png = OUT_DIR / "fig_benchmark_epoch_variation_and_convergence.png"
     fig.suptitle("Active Learning Replay Benchmark: Impact of Intermediate Epochs & Final Convergence", fontsize=12.0, fontweight="bold", color=INK, y=0.995)
@@ -217,7 +218,6 @@ def main():
     fig.savefig(out_png, dpi=300, bbox_inches="tight")
     print(f"Saved publication figure: {out_png}")
     plt.close(fig)
-
 
 if __name__ == "__main__":
     main()

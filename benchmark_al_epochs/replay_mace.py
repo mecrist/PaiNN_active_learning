@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""
-================================================================================
-   MACE ACTIVE LEARNING REPLAY BENCHMARK (EPOCH VARIATION & CONVERGENCE)
-================================================================================
-Evaluates MACE active learning replay across the unified 71-point AL dataset
-for varying epochs per cycle (E in {2, 3, 5, 10}), followed by a post-AL final
-convergence training session (e.g. 50 epochs) on the completed dataset.
-
-No DFT calculations are performed; all 71 points have precomputed DFT labels.
-================================================================================
-"""
-
 import sys
 import os
 import time
@@ -116,15 +103,12 @@ def main():
     print(f"Final Conv:       {args.conv_epochs} epochs (patience: {args.conv_patience})")
     print("=" * 80)
 
-    # 1. Base model path
     base_model_path = Path("/home/maria.crist/dft_mlip/sep_pax/al_5A_mace/model/silica_water_mace_run-777.model")
     current_model_path = ckpt_dir / "current_mace.model"
     shutil.copyfile(base_model_path, current_model_path)
 
-    # Initialize Calculator
     calc = MACECalculator(model_paths=str(current_model_path), device=args.device)
 
-    # 2. Load Datasets
     data_dir = BENCHMARK_DIR / "data"
     base_train = read(str(data_dir / "base_train.extxyz"), index=":", format="extxyz")
     base_val = read(str(data_dir / "base_val.extxyz"), index=":", format="extxyz")
@@ -138,7 +122,6 @@ def main():
     current_train_pool = list(base_train)
     write(str(current_train_file), current_train_pool, format="extxyz")
 
-    # 3. Initial Pre-AL Zero-Shot Evaluation
     print("\n>>> Evaluating Pre-AL baseline accuracy on 145-frame test set...")
     initial_metrics = evaluate_mace_on_test(calc, test_145)
     print(f"    Initial Energy RMSE: {initial_metrics['energy_rmse_mev_per_atom']:.2f} meV/atom")
@@ -151,7 +134,6 @@ def main():
         "final_convergence": None,
     }
 
-    # 4. Sequential Active Learning Replay Loop
     total_start_time = time.time()
     num_cycles = len(al_pool)
 
@@ -231,7 +213,6 @@ def main():
             "test_eval": None,
         }
 
-        # Periodic test evaluation
         if cycle_idx == 1 or cycle_idx % args.eval_every == 0 or cycle_idx == num_cycles:
             print(f"    >>> Running periodic test evaluation (Cycle {cycle_idx})...")
             t_eval = evaluate_mace_on_test(calc, test_145)
@@ -248,7 +229,6 @@ def main():
     print(f"MACE REPLAY COMPLETE for {num_cycles} cycles in {total_replay_time/60.0:.1f} minutes.")
     print(f"================================================================================")
 
-    # 5. Final Post-AL Convergence Training Session
     if args.conv_epochs > 0:
         print(f"\n>>> Running Post-AL Final Convergence Session ({args.conv_epochs} epochs)...")
         conv_start = time.time()

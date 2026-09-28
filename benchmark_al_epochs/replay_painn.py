@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""
-================================================================================
-   PAINN ACTIVE LEARNING REPLAY BENCHMARK (EPOCH VARIATION & CONVERGENCE)
-================================================================================
-Evaluates PaiNN active learning replay across the unified 71-point AL dataset
-for varying epochs per cycle (E in {2, 3, 5, 10}), followed by a post-AL final
-convergence training session (e.g. 50 epochs) on the completed dataset.
-
-No DFT calculations are performed; all 71 points have precomputed DFT labels.
-================================================================================
-"""
-
 import sys
 import os
 import time
@@ -23,7 +10,6 @@ import numpy as np
 import torch
 from ase.io import read, write
 
-# Ensure aims_PAX package and NFF are accessible
 BENCHMARK_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BENCHMARK_DIR.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -31,7 +17,6 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from aims_PAX.tools.model_tools.setup_painn import setup_painn_ensemble, PainnEnsembleCalculator
 from aims_PAX.tools.model_tools.train_painn import retrain_painn_ensemble, run_final_convergence
 
-# Reference energies matching the base pre-trained PaiNN committee (from reference_energies.json)
 REF_ENERGIES = {
     1: 1295.1619808355229,    # H (eV)
     8: -4671.611073387086,    # O (eV)
@@ -126,7 +111,6 @@ def main():
     print(f"Model Type:       {'Single Model (model_0)' if args.single_model else '3-Member Committee'}")
     print("=" * 80)
 
-    # 1. Prepare initial model directories
     base_ensemble_dir = Path("/home/maria.crist/dft_mlip/my_dataset/mine/model_2_ep500/silica_Painn_model_finetuned/painn_ensemble")
     model_indices = [0] if args.single_model else [0, 1, 2]
     active_model_dirs = []
@@ -139,14 +123,12 @@ def main():
         shutil.copytree(src, dst)
         active_model_dirs.append(dst)
 
-    # Initialize Calculator
     calc = setup_painn_ensemble(
         model_dirs=active_model_dirs,
         ref_energies=REF_ENERGIES,
         device=args.device,
     )
 
-    # 2. Load Datasets
     data_dir = BENCHMARK_DIR / "data"
     base_train = read(str(data_dir / "base_train.extxyz"), index=":", format="extxyz")
     base_val = read(str(data_dir / "base_val.extxyz"), index=":", format="extxyz")
@@ -155,13 +137,11 @@ def main():
 
     print(f"Loaded {len(base_train)} base train, {len(base_val)} base val, {len(al_pool)} AL frames, {len(test_145)} test frames.")
 
-    # Dynamic training dataset file
     current_train_file = out_dir / "current_train.extxyz"
     val_file = data_dir / "base_val.extxyz"
     current_train_pool = list(base_train)
     write(str(current_train_file), current_train_pool, format="extxyz")
 
-    # 3. Initial Pre-AL Zero-Shot Evaluation
     print("\n>>> Evaluating Pre-AL baseline accuracy on 145-frame test set...")
     initial_metrics = evaluate_model_on_test(calc, test_145)
     print(f"    Initial Energy RMSE: {initial_metrics['energy_rmse_mev_per_atom']:.2f} meV/atom")
@@ -174,7 +154,6 @@ def main():
         "final_convergence": None,
     }
 
-    # 4. Sequential Active Learning Replay Loop
     total_start_time = time.time()
     num_cycles = len(al_pool)
 
@@ -186,7 +165,6 @@ def main():
 
         print(f"\n--- [Cycle {cycle_idx:02d}/{num_cycles}] Appended AL Point #{cycle_idx} (Total pool: {len(current_train_pool)} frames) ---")
 
-        # Retrain for specified epochs per cycle
         updated_paths = retrain_painn_ensemble(
             calculator=calc,
             dataset_path=current_train_file,
@@ -209,7 +187,6 @@ def main():
             "test_eval": None,
         }
 
-        # Periodic test evaluation
         if cycle_idx == 1 or cycle_idx % args.eval_every == 0 or cycle_idx == num_cycles:
             print(f"    >>> Running periodic test evaluation (Cycle {cycle_idx})...")
             t_eval = evaluate_model_on_test(calc, test_145)
@@ -218,7 +195,6 @@ def main():
 
         replay_log["cycles"].append(cycle_info)
 
-        # Save checkpoint metrics JSON after every cycle
         with open(out_dir / "replay_metrics.json", "w") as f:
             json.dump(replay_log, f, indent=2)
 
@@ -227,7 +203,6 @@ def main():
     print(f"REPLAY COMPLETE for {num_cycles} cycles in {total_replay_time/60.0:.1f} minutes.")
     print(f"================================================================================")
 
-    # 5. Final Post-AL Convergence Training Session
     if args.conv_epochs > 0:
         print(f"\n>>> Running Post-AL Final Convergence Session ({args.conv_epochs} epochs, patience {args.conv_patience})...")
         conv_out_dir = out_dir / "converged_models"
@@ -247,7 +222,6 @@ def main():
         )
         conv_duration = time.time() - conv_start
 
-        # Final test evaluation on converged models
         print("\n>>> Final evaluation of fully converged model on 145-frame test set...")
         conv_metrics = evaluate_model_on_test(calc, test_145)
         conv_metrics["conv_wallclock_sec"] = conv_duration
