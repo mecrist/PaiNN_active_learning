@@ -3,7 +3,7 @@
 ================================================================================
    BENCHMARK ANALYSIS & PUBLICATION PLOT: AL EPOCH VARIATION & CONVERGENCE
 ================================================================================
-Parses JSON metrics from PaiNN and MACE replay runs with 1, 2, 3, 5, and 10 epochs
+Parses JSON metrics from PaiNN and MACE replay runs with 1, 2, 3, and 5 epochs
 per cycle, plus final post-AL convergence sessions.
 Generates publication-quality head-to-head figures (300 DPI PNG).
 ================================================================================
@@ -26,17 +26,17 @@ INK = "#14140F"
 MUTED = "#8A887F"
 
 PAINN_COLORS = {
+    1: "#4CC9F0",
     2: "#2E5BFF",
     3: "#7B2CBF",
     5: "#0096C7",
-    10: "#B5179E",
 }
 
 MACE_COLORS = {
+    1: "#FFB703",
     2: "#F77F00",
     3: "#D62828",
     5: "#9D0208",
-    10: "#6A040F",
 }
 
 plt.rcParams.update({
@@ -79,7 +79,7 @@ def panel_label(ax, letter):
 def col_title(ax, text):
     ax.set_title(text, fontsize=10.5, fontweight="medium", color=INK, pad=8)
 
-def load_metrics(pattern):
+def load_metrics(pattern, allowed_epochs=(1, 2, 3, 5)):
     results = {}
     for d in sorted(BENCHMARK_DIR.glob(pattern)):
         m_file = d / "replay_metrics.json"
@@ -87,7 +87,8 @@ def load_metrics(pattern):
             with open(m_file, "r") as f:
                 data = json.load(f)
             ep = data.get("config", {}).get("epochs_per_cycle", 0)
-            results[(ep, d.name)] = data
+            if ep in allowed_epochs:
+                results[(ep, d.name)] = data
     return dict(sorted(results.items(), key=lambda kv: kv[0][0]))
 
 def main():
@@ -152,7 +153,7 @@ def main():
     col_title(ax, "Post-AL Final Converged Energy RMSE (50 Ep)")
     ax.set_ylabel("Final Converged Energy RMSE (meV/atom)")
 
-    epochs_list = [2, 3, 5, 10]
+    epochs_list = [1, 2, 3, 5]
     x = np.arange(len(epochs_list))
     width = 0.35
 
@@ -185,7 +186,7 @@ def main():
 
     ax.set_xticks(x)
     ax.set_xticklabels([f"{ep} ep/cyc" for ep in epochs_list])
-    ax.set_ylim(0, 3.4)
+    ax.set_ylim(0, 3.6)
     ax.legend(loc="upper right", fontsize=8.5, frameon=True, facecolor="white", edgecolor=MUTED)
 
     # Panel D: Total Computational Overhead vs. Final Error (Pareto Trade-off)
@@ -195,6 +196,7 @@ def main():
     col_title(ax, "Training Wall-Clock vs. Final Accuracy (Pareto Trade-off)")
     ax.set_xlabel("Total Training Wall-Clock Time (minutes)")
     ax.set_ylabel("Final Converged Energy RMSE (meV/atom)")
+    ax.set_ylim(2.45, 2.90)
 
     for (ep, name), data in painn_results.items():
         if data.get("final_convergence"):
